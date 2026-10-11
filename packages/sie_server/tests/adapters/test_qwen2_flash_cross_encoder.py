@@ -375,7 +375,24 @@ def test_native_load_preserves_source_and_uses_cpu_safe_sdpa(monkeypatch) -> Non
 
 @pytest.mark.parametrize(
     ("device", "precision", "dtype"),
-    [("mps", "bfloat16", torch.float16), ("mps", "float32", torch.float32), ("cuda:0", "bfloat16", torch.bfloat16)],
+    [
+        (None, "float16", torch.float16),
+        (None, "bfloat16", torch.bfloat16),
+        (None, "float32", torch.float32),
+        ("cpu", "bfloat16", torch.float32),
+        ("cpu:0", "float16", torch.float32),
+        ("cpu:0", "bfloat16", torch.float32),
+        ("cpu:0", "float32", torch.float32),
+        ("mps", "bfloat16", torch.float16),
+        ("mps", "float32", torch.float32),
+        ("mps:0", "float16", torch.float16),
+        ("mps:0", "bfloat16", torch.float16),
+        ("mps:0", "float32", torch.float32),
+        ("cuda", "bfloat16", torch.bfloat16),
+        ("cuda:0", "float16", torch.float16),
+        ("cuda:0", "bfloat16", torch.bfloat16),
+        ("cuda:1", "float32", torch.float32),
+    ],
 )
 def test_native_precision_resolution_without_hardware(device, precision, dtype) -> None:
     adapter = Qwen2CrossEncoderAdapter("unused", compute_precision=precision)

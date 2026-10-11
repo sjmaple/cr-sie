@@ -767,9 +767,10 @@ class Qwen2CrossEncoderAdapter(Qwen2FlashCrossEncoderAdapter):
         self._load_model(device, attn_implementation="sdpa")
 
     def _resolve_dtype(self) -> torch.dtype:
-        if self._device == "cpu":
+        device_type = torch.device(self._device).type if self._device is not None else None
+        if device_type == "cpu":
             return torch.float32
-        if self._device == "mps" and self._compute_precision == "bfloat16":
+        if device_type == "mps" and self._compute_precision == "bfloat16":
             return torch.float16
         return super()._resolve_dtype()
 
