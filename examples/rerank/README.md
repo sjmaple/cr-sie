@@ -83,6 +83,50 @@ runner checks the model revision before scoring, sends all 20 candidates through
 from the published study. Self-hosting setup is in the repository's [README](../../README.md).
 GPU serving needs a suitable GPU host; the offline scorer does not.
 
+### Replay the 499-question input through a URL
+
+The fixed model is `Qwen/Qwen3-Reranker-4B`, checkpoint
+`22e683669bc0f0bd69640a1354a6d0aebcfeede5`. After fetching the evidence, set
+`SIE_URL` to your compatible endpoint and select the proposed-rule arm:
+
+```sh
+SIE_URL=http://localhost:8000 mise exec -- uv run --package sie-sdk python examples/rerank/run.py \
+  --data examples/rerank/data --record --limit 499 --arm proposed --out proposed-url-trial.json
+```
+
+`--base-url` overrides `SIE_URL`; the legacy `SIE_BASE_URL` remains supported.
+Authentication is optional: provide `SIE_API_KEY` for an endpoint that requires it.
+The default `--arm both` preserves the paired trial behavior; `--arm in-force`
+selects the adopted-rule wording. `--show 'CASE ID' --arm proposed` previews the
+single request envelope without sending it.
+
+This uses all 499 cases in original file order, with the original query and 20
+candidate IDs/texts per case, and makes one logical score call per case under the
+literal proposed-rule wording. Normal SDK capacity-retry behavior still applies
+to a URL trial. The full [input body](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/e5b19d7589fc3a982fcfeeabb071cf833c22455f/rerank-relevance-rules/inputs/cases_test.json)
+has SHA-256 `1d32077e5679be1afa8ed40a0b1893ee8181225c02b7ff6aeafdf29d9ee0c203`.
+The [E2 frozen recipe](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/aa5d3ed2074afce7bb5b2ed6f9dcd4ed8bcacd5a/current-comparators/2026-10-11/rerank/prereg/frozen.json)
+binds that body and the exact `rules.w2.proposed` instruction used here.
+
+The [native timing input builder](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/3918f806bf5a15b3f59667b76dc3fbd73a0d8dc6/latency-fastest-config/2026-10-11/prereg/code/build_p2.py)
+uses those same bodies and instruction; its reconstructed 499-job file is bound by
+[jobs-sha256.json](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/3918f806bf5a15b3f59667b76dc3fbd73a0d8dc6/latency-fastest-config/2026-10-11/prereg/jobs-sha256.json)
+at SHA-256 `53e05bf9fac6ce4c378c6e737ecf966368c5953beb3a4c8f67ffa2a1b1974822`.
+The [recorded native timings](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/3918f806bf5a15b3f59667b76dc3fbd73a0d8dc6/latency-fastest-config/2026-10-11/results/rerank.json)
+used a colocated Rust sidecar local-ingest socket, with no gateway or network.
+A URL replay includes that URL's gateway, transport and network path; its timings
+would be separate evidence. This trial runner does not reproduce the historical
+GPU/concurrency timing protocol or record latency statistics.
+
+The focused `tests/test_run.py` tests use the repository SDK and an offline
+`httpx.MockTransport`; no live endpoint or model is needed. Run them from the
+repository root after installing the SDK dependencies:
+
+```sh
+mise exec -- uv run --package sie-sdk python -m unittest discover \
+  -s examples/rerank/tests -p test_run.py -v
+```
+
 ## Cost scope
 
 The recorded caller-content usage averages **3,502.27 tokens per 20-candidate query**.
