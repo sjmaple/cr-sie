@@ -27,6 +27,11 @@ ignore = [
     # tokenizers 0.23 -> macro_rules_attribute. Drop when tokenizers ships a
     # release off macro_rules_attribute/paste.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained (archived, no vuln); transitive via tokenizers 0.23 macro_rules_attribute; awaiting upstream bump" },
+    # `unsafe-libyaml` is archived and unmaintained (no vulnerability). It
+    # comes in through our direct `serde_yaml` 0.9 dependency in sie-gateway
+    # and the standalone Candle worker, which parse only operator-supplied
+    # model and bundle configs. Drop when both move off serde_yaml (#712).
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained (archived, no vuln); via direct serde_yaml 0.9 in sie-gateway and sie-server-rust; migration tracked in #712" },
 ]
 
 [licenses]
