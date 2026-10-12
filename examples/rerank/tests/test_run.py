@@ -57,6 +57,11 @@ class URLTrialTests(unittest.TestCase):
         self.clients = []
         self.model_revision = scorer.MODEL_REVISION
         self.bad_candidate_set = False
+        self.execution_revision = "a" * 64
+        self.next_execution_revision = self.execution_revision
+        self.invalid_score = False
+        self.invalid_score_value = None
+        self.missing_score = False
 
     def transport(self, request):
         self.requests.append(request)
@@ -70,10 +75,18 @@ class URLTrialTests(unittest.TestCase):
             "model": runner.MODEL,
             "scores": [{"item_id": item["id"], "score": 1.0 - i / 20, "rank": i} for i, item in enumerate(items)],
         }
+        if self.missing_score:
+            del reply["scores"][0]["score"]
+        elif self.invalid_score:
+            reply["scores"][0]["score"] = self.invalid_score_value
+        headers = {"Content-Type": "application/msgpack"}
+        if self.execution_revision is not None:
+            headers["X-SIE-Model-Revision"] = self.execution_revision
+        self.execution_revision = self.next_execution_revision
         return httpx.Response(
             200,
             content=msgpack.packb(reply, use_bin_type=True),
-            headers={"Content-Type": "application/msgpack", "X-SIE-Model-Revision": scorer.MODEL_REVISION},
+            headers=headers,
         )
 
     def invoke(self, arguments=(), environment=None):
@@ -121,6 +134,7 @@ class URLTrialTests(unittest.TestCase):
                 self.assertEqual([row["case"] for row in saved], [case["id"] for case in self.cases])
                 self.assertEqual([row["arm"] for row in saved], ["proposed", "proposed"])
                 self.assertTrue(all(row["model_revision"] == scorer.MODEL_REVISION for row in saved))
+                self.assertTrue(all(row["execution_revision"] == "a" * 64 for row in saved))
                 self.output.unlink()
 
     def test_paired_default_and_url_precedence(self):
@@ -169,6 +183,43 @@ class URLTrialTests(unittest.TestCase):
         self.assertEqual(len(self.score_requests()), 1)
         self.assertTrue(all(client.is_closed for client in self.clients))
         self.assertFalse(self.output.exists())
+
+    def test_invalid_scores_close_client_without_trial(self):
+        for value in [None, "not a number", True, float("nan"), float("inf"), -float("inf")]:
+            with self.subTest(score=repr(value)):
+                self.requests.clear()
+                self.invalid_score = True
+                self.invalid_score_value = value
+                with self.assertRaisesRegex(SystemExit, "scores are invalid"):
+                    self.invoke(["--record", "--arm", "proposed"])
+                self.assertEqual(len(self.score_requests()), 1)
+                self.assertTrue(all(client.is_closed for client in self.clients))
+                self.assertFalse(self.output.exists())
+        self.missing_score = True
+        with self.assertRaisesRegex(SystemExit, "scores are invalid"):
+            self.invoke(["--record", "--arm", "proposed"])
+        self.assertTrue(all(client.is_closed for client in self.clients))
+        self.assertFalse(self.output.exists())
+
+    def test_execution_revision_drift_closes_client_without_trial(self):
+        for next_revision in ["b" * 64, None]:
+            with self.subTest(next_revision=next_revision):
+                self.requests.clear()
+                self.execution_revision = "a" * 64
+                self.next_execution_revision = next_revision
+                with self.assertRaisesRegex(SystemExit, "execution revision changed"):
+                    self.invoke(["--record", "--limit", "2", "--arm", "proposed"])
+                self.assertEqual(len(self.score_requests()), 2)
+                self.assertTrue(all(client.is_closed for client in self.clients))
+                self.assertFalse(self.output.exists())
+
+    def test_missing_execution_revision_is_recorded_separately_from_weights(self):
+        self.execution_revision = None
+        self.next_execution_revision = None
+        self.invoke(["--record", "--limit", "2", "--arm", "proposed"])
+        saved = json.loads(self.output.read_text())
+        self.assertTrue(all(row["model_revision"] == scorer.MODEL_REVISION for row in saved))
+        self.assertTrue(all(row["execution_revision"] is None for row in saved))
 
 
 if __name__ == "__main__":

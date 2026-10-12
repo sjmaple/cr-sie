@@ -79,9 +79,16 @@ mise exec -- uv run --package sie-sdk python examples/rerank/run.py \
 This explicitly runs inference: one question under two rules by default. For a hosted
 endpoint, use its base URL and provide `SIE_API_KEY` through your environment. The
 runner checks the model revision before scoring, sends all 20 candidates through
-`SIEClient.score`, and refuses to overwrite an existing trial file. Trials are separate
-from the published study. Self-hosting setup is in the repository's [README](../../README.md).
+`SIEClient.score`, rejects invalid or non-finite scores, and refuses to overwrite
+an existing trial file. Trials are separate from the published study. Self-hosting
+setup is in the repository's [README](../../README.md).
 GPU serving needs a suitable GPU host; the offline scorer does not.
+
+Trial records distinguish the catalog's weights checkpoint (`model_revision`)
+from the response's execution identity (`execution_revision`). On the gateway,
+the latter is a bundle/config digest, not the weights checkpoint. A change in
+that reported identity during a trial rejects the trial. Endpoints that omit
+the response header record `null`; their execution identity is unverified.
 
 ### Replay the 499-question input through a URL
 

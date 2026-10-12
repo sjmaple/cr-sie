@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 
@@ -69,20 +70,38 @@ def main() -> None:
             raise SystemExit("Endpoint does not report the recorded model revision; no inference sent")
         for case in cases[: args.limit]:
             for arm, instruction in rules.items():
-                response = client.score(
-                    MODEL,
-                    Item(text=case["query"]),
-                    [Item(id=item["id"], text=item["text"]) for item in case["candidates"]],
-                    instruction=instruction,
-                    wait_for_capacity=True,
-                    provision_timeout_s=900,
-                )
+                try:
+                    response = client.score(
+                        MODEL,
+                        Item(text=case["query"]),
+                        [Item(id=item["id"], text=item["text"]) for item in case["candidates"]],
+                        instruction=instruction,
+                        wait_for_capacity=True,
+                        provision_timeout_s=900,
+                    )
+                except (KeyError, TypeError) as error:
+                    raise SystemExit("Response scores are invalid; trial not written") from error
+                execution_revision = client.last_model_revision
+                if results and execution_revision != results[0]["execution_revision"]:
+                    raise SystemExit("Endpoint execution revision changed; trial not written")
                 ids = {item["id"] for item in case["candidates"]}
                 returned = response["scores"]
-                if len(returned) != len(ids) or {item["item_id"] for item in returned} != ids:
-                    raise SystemExit("Response candidate set differs; trial not written")
+                valid_scores = all(
+                    isinstance(value := item.get("score"), (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    for item in returned
+                )
+                if len(returned) != len(ids) or {item["item_id"] for item in returned} != ids or not valid_scores:
+                    raise SystemExit("Response candidate set differs or scores are invalid; trial not written")
                 results.append(
-                    {"case": case["id"], "arm": arm, "model_revision": client.last_model_revision, "response": response}
+                    {
+                        "case": case["id"],
+                        "arm": arm,
+                        "model_revision": served,
+                        "execution_revision": execution_revision,
+                        "response": response,
+                    }
                 )
     with args.out.open("x", encoding="utf-8") as output:
         json.dump(results, output, indent=2)
