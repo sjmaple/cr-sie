@@ -67,19 +67,16 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def manifest_entries(
-    body: bytes, *, digest: str | None = None, files: tuple[str, ...] | None = None
-) -> dict[str, tuple[str, int]]:
+def manifest_entries(body: bytes) -> dict[str, tuple[str, int]]:
     """Check MANIFEST.json against its pinned digest; return (sha256, bytes) for each file this example uses."""
-    digest = MANIFEST_SHA256 if digest is None else digest
-    if sha256(body) != digest:
-        raise EvidenceError(f"{MANIFEST} does not match the pinned SHA-256 {digest}")
+    if sha256(body) != MANIFEST_SHA256:
+        raise EvidenceError(f"{MANIFEST} does not match the pinned SHA-256 {MANIFEST_SHA256}")
     manifest = json.loads(body)
     listed = manifest.get("files") if isinstance(manifest, dict) else None
     if not isinstance(listed, dict):
         raise EvidenceError(f"{MANIFEST} has no files table")
     entries: dict[str, tuple[str, int]] = {}
-    for name in FILES if files is None else files:
+    for name in FILES:
         entry = listed.get(name)
         if not isinstance(entry, dict):
             raise EvidenceError(f"{name}: not listed in {MANIFEST}")
@@ -100,12 +97,12 @@ def check_file(name: str, data: bytes, entry: tuple[str, int]) -> None:
         raise EvidenceError(f"{name}: SHA-256 differs from {MANIFEST}")
 
 
-def verify_evidence(directory: Path, *, digest: str | None = None, files: tuple[str, ...] | None = None) -> None:
+def verify_evidence(directory: Path) -> None:
     """Raise EvidenceError unless the directory holds the pinned manifest and every file matches it."""
     manifest = directory / MANIFEST
     if not manifest.is_file():
         raise EvidenceError(f"{directory} has no {MANIFEST}; run fetch.py first")
-    for name, entry in manifest_entries(manifest.read_bytes(), digest=digest, files=files).items():
+    for name, entry in manifest_entries(manifest.read_bytes()).items():
         path = directory / name
         if not path.is_file():
             raise EvidenceError(f"{name}: missing from {directory}; run fetch.py first")
