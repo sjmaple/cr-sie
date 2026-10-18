@@ -25,8 +25,14 @@ then the oldest flagged item, and so on. A batchable item never waits inside
 a long item's batch, and waits for at most one flagged item between two
 batches of its lane. A flagged item with k flagged items ahead of it waits
 for at most k + 1 batches of batchable items, however many keep arriving.
-When nothing pending is flagged, batch formation is exactly the cost-sorted
-greedy packing above.
+Within the batchable lane, an ordinary cost-sorted batch that bypasses the
+oldest item reserves that exact item for the next batchable turn. That turn
+packs from the reserved item's cost-sorted suffix, without wrapping to cheaper
+items, then ordinary packing resumes. Future cheap arrivals therefore cannot
+starve an older item, including an item that exceeds the current cost budget.
+An item with k older batchable items waits for at most 2(k + 1) batchable turns;
+flagged turns can interleave as above. This bounds dispatch opportunities, not
+inference duration. Ordinary batches that include the oldest item are unchanged.
 
 Cost semantics vary by modality (modality-native units):
 - Text: cost = token count
@@ -86,6 +92,7 @@ class PendingRequest[I: HasCost, T]:
     metadata: T
     arrival_time: float = field(default_factory=time.monotonic)
     runs_alone: bool = False
+    _arrival_order: int = field(default=0, init=False, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -229,6 +236,8 @@ class BatchFormer[I: HasCost, T]:
         self._first_request_time: float | None = None
         self._last_submit_time: float | None = None
         self._last_batch_alone: bool | None = None
+        self._next_arrival_order = 0
+        self._reserved_request: PendingRequest[I, T] | None = None
 
     @property
     def config(self) -> BatchConfig:
@@ -323,6 +332,8 @@ class BatchFormer[I: HasCost, T]:
     def _append_item(self, item: I, metadata: T) -> None:
         """Append item to pending list (caller must hold lock)."""
         request = PendingRequest(item=item, metadata=metadata, runs_alone=getattr(item, "runs_alone", False) is True)
+        request._arrival_order = self._next_arrival_order
+        self._next_arrival_order += 1
         self._pending.append(request)
         self._total_cost += item.cost
 
@@ -449,7 +460,10 @@ class BatchFormer[I: HasCost, T]:
         2. Take requests until max_batch_cost would be exceeded
         3. Keep remaining requests for next get_batch() call
 
-        This minimizes padding waste by grouping similar-cost sequences.
+        This minimizes padding waste by grouping similar-cost sequences. If
+        ordinary packing bypassed the oldest batchable item last time, this
+        batchable turn starts at that exact reserved item and cannot wrap into
+        its cheaper prefix. The following batchable turn uses ordinary packing.
         When a pending request is flagged ``runs_alone``, the order comes from
         ``_order_runs_alone_lane`` instead, and a flagged request is always
         taken on its own.
@@ -457,9 +471,9 @@ class BatchFormer[I: HasCost, T]:
         Args:
             max_items: Optional hard cap on the number of items taken, on top of
                 the cost/request limits. Used by ``try_drain`` to bound a
-                continuous-batch drain to a caller-held snapshot budget so
-                post-snapshot arrivals are not swept in ahead of the next FCFS
-                selection. See #1606.
+                continuous-batch drain to a caller-held snapshot count before
+                the next FCFS selection. This bounds how many items are taken,
+                not which arrivals are eligible. See #1606.
             coalesce_cap_ms: The coalesce cap the caller used to decide the
                 yield (#2874), threaded through so the logged trigger matches
                 the actual yield reason (a capped-coalesce dispatch logs
@@ -478,6 +492,20 @@ class BatchFormer[I: HasCost, T]:
             # Sort pending by cost (ascending) for optimal batching
             self._pending.sort(key=lambda r: r.item.cost)
 
+        reserved_turn = self._reserved_request is not None and bool(self._pending) and not self._pending[0].runs_alone
+        reserved_limit = len(self._pending)
+        if reserved_turn:
+            # Keep flagged-lane ordering intact. The batchable suffix stays
+            # cost-sorted, and the cheaper prefix waits for the ordinary turn.
+            reserved_index = next(
+                index for index, request in enumerate(self._pending) if request is self._reserved_request
+            )
+            batchable_end = next(
+                (index for index, request in enumerate(self._pending) if request.runs_alone), len(self._pending)
+            )
+            self._pending[:batchable_end] = self._pending[reserved_index:batchable_end] + self._pending[:reserved_index]
+            reserved_limit = batchable_end - reserved_index
+
         # Greedily take items until we exceed max_batch_cost
         batch_items: list[I] = []
         batch_metadata: list[T] = []
@@ -487,8 +515,10 @@ class BatchFormer[I: HasCost, T]:
         hit_request_limit = False
 
         for request in self._pending:
+            if take_count >= reserved_limit:
+                break
             # Respect an explicit per-extract item cap (a drain-fairness bound)
-            # before anything else, so post-snapshot arrivals stay queued.
+            # even when new arrivals have joined the pending list.
             if max_items is not None and take_count >= max_items:
                 break
             # A runs_alone item never shares a batch: stop in front of one
@@ -520,6 +550,16 @@ class BatchFormer[I: HasCost, T]:
         if take_count > 0:
             # Whose turn is next when both lanes are pending.
             self._last_batch_alone = lane == "alone"
+            if lane == "batched":
+                if reserved_turn:
+                    self._reserved_request = None
+                elif take_count < len(self._pending):
+                    oldest = min(
+                        (request for request in self._pending if not request.runs_alone),
+                        key=lambda request: request._arrival_order,
+                    )
+                    if all(request is not oldest for request in self._pending[:take_count]):
+                        self._reserved_request = oldest
 
         # Remove taken items from pending
         self._pending = self._pending[take_count:]
@@ -546,6 +586,7 @@ class BatchFormer[I: HasCost, T]:
         if not self._pending:
             self._first_request_time = None
             self._last_submit_time = None
+            self._reserved_request = None
 
         return FormattedBatch(
             items=batch_items,
@@ -583,6 +624,7 @@ class BatchFormer[I: HasCost, T]:
         self._total_cost = 0
         self._first_request_time = None
         self._last_submit_time = None
+        self._reserved_request = None
         return metadata
 
     async def try_drain(self, max_items: int | None = None) -> FormattedBatch[I, T] | None:
@@ -594,9 +636,10 @@ class BatchFormer[I: HasCost, T]:
         inference don't need to wait an additional batch formation window.
 
         Args:
-            max_items: Optional cap on how many items this drain may take, so a
-                caller draining a snapshot backlog does not sweep in items that
-                arrived mid-drain. See #1606.
+            max_items: Optional cap on how many items this drain may take from
+                the current pending list. A caller can bound its total drain
+                to an earlier backlog count, without freezing member identities.
+                See #1606.
 
         Returns:
             FormattedBatch if items were pending, None otherwise.

@@ -1377,7 +1377,7 @@ class ModelWorker:
     async def _drain_active_batcher(self, active_lora: str | None) -> bool:
         """Continuous-batching drain of ``active_lora``'s batcher.
 
-        Bounded to the backlog present at entry: a saturated LoRA whose
+        Bounded to the backlog count at entry: a saturated LoRA whose
         ``submit()`` coroutines keep refilling its own batcher during each GPU
         forward pass would otherwise never let this loop exit, starving sibling
         LoRAs / the base model (they are only re-examined once control returns
@@ -1391,10 +1391,9 @@ class ModelWorker:
         if batcher is None:
             return False
 
-        # Snapshot the backlog at entry; items that arrive mid-drain wait for
-        # the next FCFS selection instead of extending the drain indefinitely.
-        # Cap every drain to the remaining budget so a batch formed late in the
-        # loop can't sweep in post-snapshot arrivals and overshoot the backlog.
+        # Snapshot the backlog count, not its member identities. New arrivals
+        # may be selected, but cannot extend the total number of items drained
+        # before the next FCFS selection. Cap every batch to the remaining count.
         drain_budget = batcher.pending_count
         drained = False
         while drain_budget > 0:
