@@ -9,7 +9,10 @@ Everything lives in `examples/request-routing/`; larger data comes from Hugging 
 
 ```sh
 git clone https://github.com/superlinked/sie.git
-cd sie/examples/request-routing/cost
+cd sie
+git fetch origin 39aa493546cd2948afbbf923ede4917b378f3a11
+git switch --detach FETCH_HEAD
+cd examples/request-routing/cost
 uv sync --frozen
 uv run --frozen python workshop.py download
 uv run --frozen python workshop.py learn --labels 64 --output run-output/policy64.json
@@ -17,6 +20,8 @@ uv run --frozen python workshop.py evaluate --policy run-output/policy64.json
 uv run --frozen python workshop.py learn --labels 512 --output run-output/policy512.json
 uv run --frozen python workshop.py evaluate --policy run-output/policy512.json
 ```
+
+This pins the tested workshop snapshot, including while its PR is under review.
 
 You fit 2,560 weights and one bias on frozen **Qwen3-Embedding-4B** vectors.
 The encoder is unchanged. Regularization and the routing cutoff use training
