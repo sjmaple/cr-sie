@@ -232,6 +232,13 @@ class ModelWorker:
         self._model_name = model_name
         self._postprocessor_registry = postprocessor_registry
         self._registry_callbacks = registry_callbacks
+        # Task-restricted adapters opt in explicitly. Cache the bound method
+        # once; ordinary adapters (including dynamic test doubles) have no
+        # admission callback, and score/encode never consult this hook.
+        declared_admission = getattr(type(adapter), "validate_extract_request", None)
+        self._extract_admission: Callable[..., None] | None = (
+            getattr(adapter, "validate_extract_request", None) if callable(declared_admission) else None
+        )
 
         # Protect adapter-global state, especially active LoRA selection,
         # across the direct HTTP batcher and the sidecar IPC pre-formed batch
@@ -849,6 +856,10 @@ class ModelWorker:
             QueueFullError: If queue is full and cannot accept more items.
         """
         self._check_queue_capacity(len(prepared_items))
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
 
@@ -882,7 +893,7 @@ class ModelWorker:
 
         Items are batched with other score requests for efficient GPU utilization.
         (query, doc) pairs from different requests can batch together if they
-        share the same instruction.
+        share the same LoRA, instruction, and options.
 
         Args:
             prepared_items: Pre-processed items with cost for batching (ScorePreparedItem).
@@ -902,6 +913,7 @@ class ModelWorker:
             QueueFullError: If queue is full and cannot accept more items.
         """
         self._check_queue_capacity(len(prepared_items))
+        lora = self._score_lora(options)
 
         future, request_timing = self._create_future_and_timing(timing)
 
@@ -916,8 +928,7 @@ class ModelWorker:
             options=options,
         )
 
-        # Score operations use base model batcher (no LoRA support for reranking)
-        return await self._submit_to_batcher(prepared_items, metadata, None)
+        return await self._submit_to_batcher(prepared_items, metadata, lora)
 
     async def submit_preformed(
         self,
@@ -968,6 +979,10 @@ class ModelWorker:
     ) -> asyncio.Future[WorkerResult]:
         """Run a caller-formed extract batch directly for sidecar IPC."""
         self._check_running()
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
         metadata = RequestMetadata(
@@ -1000,8 +1015,23 @@ class ModelWorker:
         self._check_running()
 
         entries: list[tuple[Sequence[HasCost], RequestMetadata]] = []
+        guarded_futures: list[asyncio.Future[WorkerResult]] | None = [] if self._extract_admission is not None else None
         for req in requests:
             future, request_timing = self._create_future_and_timing(req.timing)
+            if guarded_futures is not None:
+                guarded_futures.append(future)
+            if self._extract_admission is not None:
+                try:
+                    self._extract_admission(
+                        req.items,
+                        labels=req.labels,
+                        output_schema=req.output_schema,
+                        instruction=req.instruction,
+                        options=req.options,
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve each request's independent outcome
+                    future.set_exception(error)
+                    continue
             entries.append(
                 (
                     req.prepared_items,
@@ -1019,7 +1049,8 @@ class ModelWorker:
                 )
             )
 
-        return await self._submit_preformed_metadata_batch(entries, lora)
+        admitted = await self._submit_preformed_metadata_batch(entries, lora)
+        return admitted if guarded_futures is None else guarded_futures
 
     async def submit_score_preformed(
         self,
@@ -1034,6 +1065,7 @@ class ModelWorker:
     ) -> asyncio.Future[WorkerResult]:
         """Run a caller-formed score batch directly for sidecar IPC."""
         self._check_running()
+        lora = self._score_lora(options)
 
         future, request_timing = self._create_future_and_timing(timing)
         metadata = RequestMetadata(
@@ -1046,19 +1078,30 @@ class ModelWorker:
             instruction=instruction,
             options=options,
         )
-        return await self._submit_preformed_batch(prepared_items, metadata, None)
+        return await self._submit_preformed_batch(prepared_items, metadata, lora)
 
     async def submit_score_preformed_batch(
         self,
         requests: Sequence[PreformedScoreRequest],
     ) -> list[asyncio.Future[WorkerResult]]:
-        """Run caller-formed score requests as one sidecar IPC batch."""
+        """Run caller-formed score requests grouped by LoRA.
+
+        Each forward pass shares one active adapter. Preserve caller grouping
+        within each LoRA and return futures in the original request order.
+        """
         self._check_running()
 
-        entries: list[tuple[Sequence[HasCost], RequestMetadata]] = []
+        grouped_entries: dict[str | None, list[tuple[Sequence[HasCost], RequestMetadata]]] = {}
+        futures: list[asyncio.Future[WorkerResult]] = []
         for req in requests:
             future, request_timing = self._create_future_and_timing(req.timing)
-            entries.append(
+            futures.append(future)
+            try:
+                lora = self._score_lora(req.options)
+            except InvalidInputError as exc:
+                future.set_exception(exc)
+                continue
+            grouped_entries.setdefault(lora, []).append(
                 (
                     req.prepared_items,
                     RequestMetadata(
@@ -1074,11 +1117,31 @@ class ModelWorker:
                 )
             )
 
-        return await self._submit_preformed_metadata_batch(entries, None)
+        for lora, entries in grouped_entries.items():
+            await self._submit_preformed_metadata_batch(entries, lora)
+        return futures
 
     # =========================================================================
     # Internal Helpers
     # =========================================================================
+
+    def _score_lora(self, options: dict[str, Any] | None) -> str | None:
+        """Select a profile-authorized LoRA, including legacy ``lora_id`` defaults.
+
+        HTTP and queue ingress validate the selected profile's allowed sources.
+        An explicit ``lora`` (including null for base) takes precedence here.
+        """
+        if not options:
+            return None
+        lora = options.get("lora", options.get("lora_id"))
+        if lora is None:
+            return None
+        if not isinstance(lora, str) or not lora.strip():
+            raise InvalidInputError("Score LoRA selection must be a non-empty string or null")
+        supports_lora = getattr(self._adapter, "supports_lora", None)
+        if not callable(supports_lora) or not supports_lora():
+            raise InvalidInputError("This adapter does not support LoRA scoring")
+        return lora
 
     def _get_batcher(self, lora: str | None) -> BatchFormer[HasCost, RequestMetadata]:
         """Get or create batcher for a LoRA.

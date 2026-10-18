@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from sie_server.adapters.sglang import _server
+from sie_server.adapters.sglang import _memory, _server
 from sie_server.adapters.sglang._server import STARTUP_TIMEOUT_S as _STARTUP_TIMEOUT_S
 from sie_server.adapters.sglang._server import parse_device_index
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
@@ -630,6 +630,8 @@ class TestSGLangLoRA:
         adapter = SGLangEmbeddingAdapter("test-model", lora_paths=lora_paths)
 
         assert adapter._lora_paths == lora_paths
+        assert adapter.available_loras == []
+        adapter._lora.started()
         assert adapter.available_loras == ["legal", "medical"]
         assert adapter.lora_enabled is True
 
@@ -672,7 +674,8 @@ class TestSGLangLoRA:
             lora_paths={"legal": "org/legal-lora", "medical": "/path/to/medical"},
             max_loras_per_batch=4,
         )
-        adapter.load("cuda:0")
+        with patch.object(adapter._lora, "fetch", side_effect=lambda source: source):
+            adapter.load("cuda:0")
 
         # Verify command includes LoRA flags
         mock_popen.assert_called_once()
@@ -682,9 +685,7 @@ class TestSGLangLoRA:
         assert "--lora-paths" in cmd
         # Find the lora-paths value
         lora_idx = cmd.index("--lora-paths")
-        lora_paths_value = cmd[lora_idx + 1]
-        assert "legal=" in lora_paths_value
-        assert "medical=" in lora_paths_value
+        assert set(cmd[lora_idx + 1 : lora_idx + 3]) == {"legal=org/legal-lora", "medical=/path/to/medical"}
 
         assert "--max-loras-per-batch" in cmd
         batch_idx = cmd.index("--max-loras-per-batch")
@@ -731,12 +732,13 @@ class TestSGLangLoRA:
         adapter._server_url = "http://localhost:30000"
 
         items = [Item(text="test")]
+        adapter._lora.started()
         adapter.set_active_lora("legal")
         adapter.encode(items, output_types=["dense"])
 
         # Verify LoRA name is used as model name in request
         call_args = mock_post.call_args
-        assert call_args[1]["json"]["model"] == "legal"
+        assert call_args[1]["json"]["model"] == "default:legal"
 
     @patch("sie_server.adapters.sglang.embedding.requests.post")
     def test_encode_without_lora_uses_default(self, mock_post: MagicMock) -> None:
@@ -767,7 +769,7 @@ class TestSGLangLoRA:
         )
         adapter._server_url = "http://localhost:30000"
 
-        with pytest.raises(ValueError, match="LoRA 'unknown' is not loaded") as raised:
+        with pytest.raises(ValueError, match="not declared") as raised:
             adapter.set_active_lora("unknown")
 
         assert "legal" not in str(raised.value)
@@ -781,7 +783,7 @@ class TestSGLangLoRA:
         adapter._server_url = "http://localhost:30000"
         adapter._active_lora = "unknown"
 
-        with pytest.raises(ValueError, match="LoRA 'unknown' is not loaded") as raised:
+        with pytest.raises(ValueError, match="not declared") as raised:
             adapter.encode([Item(text="test")], output_types=["dense"])
 
         assert "legal" not in str(raised.value)
@@ -790,7 +792,7 @@ class TestSGLangLoRA:
         adapter = SGLangEmbeddingAdapter("test-model")  # No lora_paths
         adapter._server_url = "http://localhost:30000"
 
-        with pytest.raises(ValueError, match="LoRA 'legal' is not loaded"):
+        with pytest.raises(ValueError, match="not declared"):
             adapter.set_active_lora("legal")
 
 
@@ -1130,3 +1132,10 @@ class TestEmbeddingGroupLaunch:
     def test_a_declared_collective_port_at_width_one_is_refused(self) -> None:
         with pytest.raises(ValueError, match="nccl_port applies only above"):
             SGLangEmbeddingAdapter(model_name_or_path="Qwen/Qwen3-Embedding-8B", nccl_port=30499)
+
+
+@pytest.fixture(autouse=True)
+def mock_memory_hardware(monkeypatch):
+    """Launch lifecycle tests use synthetic weight metadata and CUDA capacity."""
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (80 * _memory.GIB, 80 * _memory.GIB))
+    monkeypatch.setattr(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB)

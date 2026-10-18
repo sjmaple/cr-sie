@@ -818,9 +818,9 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   entry that reads an upstream's Secret anywhere else fails the render. An
   upstream's Secret key must also differ from the checked credential keys
   listed in [Gateway token](#gateway-token), including the Hugging Face token,
-  gateway tokens, sie-config tokens, NATS passwords, and bundled Grafana admin
-  credentials. Optional dependency and arbitrary subchart configuration outside
-  that list needs operator separation; see [#767](https://github.com/superlinked/sie/issues/767).
+  gateway tokens, sie-config tokens, NATS passwords, and the bundled dependency
+  credentials listed there. Arbitrary subchart configuration outside that list
+  needs operator separation.
 - sie-config receives the upstream names (`SIE_UPSTREAM_NAMES`), built from the
   same `upstreams` values as the remote lanes' file, and refuses with a `422` a
   model whose remote profile names any other upstream. Without a remote lane it
@@ -1610,12 +1610,47 @@ token, a `gateway.extraEnv` token Secret, or the MCP edge cluster API key is
 the same Secret key as a checked credential: the Hugging Face
 token, a NATS password, the gateway admin token, either sie-config token, an
 image pull secret, an oauth2-proxy secret, the Better Stack token, a bundled
-Grafana admin username or password in the same namespace, the MCP connector
+Grafana admin username or password, the dependency keys below, the MCP connector
 secrets, or a chart-managed ingress TLS key. Gateway client credentials may
-share a key with each other. The guard checks this finite list; other optional
-dependency credentials and arbitrary subchart env/volume configuration need
-operator separation. Remaining dependency cases are tracked in
-[#767](https://github.com/superlinked/sie/issues/767).
+share a key with each other. Worker tokens, gateway client credentials (including
+`gateway.extraEnv` token refs and MCP edge client keys), and upstream credentials
+all use this same finite inventory.
+
+Bundled dependency refs are checked only when their actual consumer is enabled
+and its namespace matches the SIE workload namespace. The chart uses the enabled
+child chart's own naming/namespace helpers: `global.namespace` relocates SIE
+workloads, not every dependency. These rules follow the versions in `Chart.lock`:
+
+| Dependency consumer | Checked Secret keys |
+| --- | --- |
+| Grafana SMTP (`smtp.existingSecret` set) | Literal existing Secret, `smtp.userKey` / `smtp.passwordKey` (defaults `user` / `password`). |
+| Grafana LDAP (`ldap.enabled`) | Literal `ldap.existingSecret` or Grafana fullname, `ldap-toml`. |
+| KEDA operator and metrics TLS | Literal `certificates.secretName`, `ca.crt`, `tls.crt`, `tls.key`. Disabling certificate generation or webhooks does not remove these consumers. |
+| KEDA CA Issuer (`certificates.certManager.enabled` and `issuer.generate`) | Literal `caSecretName`, `tls.crt` / `tls.key`, including an existing CA when `generateCA=false`. |
+| Prometheus operator or separate admission webhook TLS | Child fullname + `-admission`, `cert` / `key`, or `tls.crt` / `tls.key` in cert-manager mode. `admissionWebhooks.enabled` does not disable these TLS mounts. |
+| Prometheus self-monitoring CA or certificate patch Jobs | Same admission Secret, `ca` (`ca.crt` for cert-manager self-monitoring). Patch Jobs read `ca` even when TLS and self-monitoring are off. |
+| Prometheus cert-manager CA Issuer (no external `issuerRef`) | Child fullname + `-root-cert`, `tls.crt` / `tls.key`, even with the operator disabled. |
+| trust-manager webhook TLS | Child name + `-tls`, `tls.crt` / `tls.key`, in both certificate-generation modes. |
+| Loki NGINX gateway basic auth | Literal `gateway.basicAuth.existingSecret` or gateway fullname, `.htpasswd`; excludes the enterprise GEL gateway. |
+| Loki's optional MinIO | Literal MinIO `existingSecret` or MinIO fullname, `rootUser` / `rootPassword`. |
+
+This is not an inventory of arbitrary dependency configuration. Operators must
+keep SIE credentials separate from Grafana `envValueFrom` / `envFromSecret`,
+extra env/volumes, raw Loki/enterprise/cloud-storage configuration, MinIO extra
+Secrets, Prometheus/Alertmanager Secret lists and provider configs, and KEDA
+`grpcTLSCertsSecret` / `hashiCorpVaultTLS` (whole-Secret mounts with scaler-defined
+filenames). External Issuer backing Secrets, custom CA/provider configuration,
+and custom dependency images also need operator review; their key layout cannot
+be inferred from the pinned chart's first-class refs; these surfaces are tracked in
+[#780](https://github.com/superlinked/sie/issues/780). Render tests enforce key
+separation, not that arbitrary TLS PEM data would be accepted as a runtime bearer
+token.
+
+In pinned trust-manager, Helm-generated TLS is created in the release namespace
+while its Deployment uses the child `namespace` override. The render rejects a
+separate child namespace with `app.webhook.tls.helmCert.enabled=true` to prevent
+that inherited certificate-generation mismatch. Use the release namespace or
+cert-manager generation instead; see [Bundling cert-manager](#bundling-cert-manager).
 
 When `gateway.extraEnv` sets `SIE_AUTH_MODE` from `valueFrom`, the mode is
 unknown at render time. The gateway then receives the generated token, as it
@@ -1673,10 +1708,25 @@ health mode the gateway reaches the workers only through NATS. The Rust worker
 (`engine: candle`) serves only probes over HTTP and receives no token, and the
 worker sidecars do not serve the worker API.
 
-Worker auth needs `sie-server` and `sie-gateway` images from this chart's
-release (its `appVersion`) or later. Images of 0.10.1 and earlier ignore these
-variables, so their workers serve without a token. A post-install and
-post-upgrade hook Job, `<fullname>-worker-auth-test-<revision>`, checks this
+Worker auth needs a `sie-server` image that supports
+`serve --require-auth-mode=token|none` and a `sie-gateway` image that presents
+`SIE_WORKER_AUTH_TOKEN`. The chart passes `--require-auth-mode=token` to every
+Python worker while enforcing auth and `--require-auth-mode=none` during the
+upgrade step. The worker asserts its resolved authentication mode before
+creating a token or starting the server; the option does not override its
+environment. Older worker CLIs reject the unknown option before serving,
+including when a lane starts after scaling from zero. Auth-disabled workers
+do not receive this option.
+
+An image tag, including this chart's default `appVersion`, does not establish
+these capabilities. The published v0.10.1 images predate worker auth; use
+images built from source containing the required worker assertion and gateway
+token forwarding before enabling it. A worker without the assertion will fail
+startup, and a gateway without token forwarding cannot establish WebSocket
+health against enforcing workers. No released minimum version is asserted.
+
+A post-install and post-upgrade hook Job,
+`<fullname>-worker-auth-test-<revision>`, additionally checks enforcement
 while the workers require the token: once a worker of each lane's current
 StatefulSet revision is ready, it sends `GET /v1/models` without a token and
 fails the release when a worker answers with anything but `401`, when a ready
@@ -1688,10 +1738,8 @@ minutes (a cold start longer than that) is skipped with a warning. The check is
 best effort: a skipped lane is not checked until a later release finds it
 running. The Job stays for a day after it finishes, so its log
 (`kubectl logs -n <namespace> job/<fullname>-worker-auth-test-<revision>`)
-shows which workers it checked and which lanes it skipped. Keep the image tags
-at the chart default, or override `workers.common.image.tag` only with a tag of
-the same release or later: with `workers.auth.enabled`, the render fails when
-that tag is a version older than the chart's `appVersion`.
+shows which workers it checked and which lanes it skipped. The startup
+assertion remains required even when this best-effort hook skips a lane.
 
 With `workers.auth.tokenSecretName` empty, the chart creates
 `<fullname>-worker-token` holding a random 64-character token under
@@ -1729,8 +1777,9 @@ helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --set workers.auth.allowUnauthenticated=true
 ```
 
-This step rolls only the gateway. Once every gateway pod has restarted,
-require the token:
+This step rolls the gateway and the Python workers, adding the startup
+capability assertion while workers still accept unauthenticated requests.
+Wait for both rollouts to finish successfully, then require the token:
 
 ```bash
 helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
@@ -2152,6 +2201,7 @@ Guards:
 2. A template-time `lookup` aborts the install when `certManagerBundle.certManager.install: true` is combined with an existing `certificates.cert-manager.io` CRD.
 3. A `pre-install` Job hook re-checks at apply time and aborts before any subchart resources are created (`lookup` returns empty during `helm template` / `--dry-run`, so the Job is the real safety net).
 4. Jetstack's `crds.keep: true` default is left in place, so `helm uninstall` does not silently delete `Certificate` / `Issuer` resources belonging to other operators.
+5. Bundled trust-manager with `trust-manager.app.webhook.tls.helmCert.enabled=true` must use the Helm release namespace. The render rejects a different `trust-manager.namespace`: the pinned dependency generates its TLS Secret and certificate DNS in the release namespace, while its Deployment honors the child namespace override. For a separate child namespace, use `helmCert.enabled=false` with cert-manager. `global.namespace` and `app.trust.namespace` do not relocate that TLS producer.
 
 Override the conflict guard (DANGER):
 

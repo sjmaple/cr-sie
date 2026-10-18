@@ -62,6 +62,45 @@ def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.C
     )
 
 
+def render_collector_config(tmp_path: Path, *, remote_enabled: bool = True) -> tuple[dict, str]:
+    chart = tmp_path / "collector-chart"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: collector-test\nversion: 0.0.0\n")
+    shutil.copyfile(ROOT / helm.CHART_DIR / "templates/_otel-collector-config.tpl", chart / "templates/_collector.tpl")
+    (chart / "templates/config.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  collector.yaml: |\n"
+        '    {{- include "sie-cluster.otel.collectorConfig" .Values | nindent 4 }}\n'
+    )
+    defaults = yaml.safe_load((ROOT / helm.CHART_DIR / "values.yaml").read_text())
+    collector = defaults["observability"]["otel"]["collector"]
+    collector["betterStack"].update({"enabled": remote_enabled, "endpoint": "https://example.invalid"})
+    values = {
+        "metricsEnabled": True,
+        "logsEnabled": False,
+        "tracesEnabled": False,
+        "prometheusEnabled": True,
+        "collector": collector,
+        "traceEndpoint": "",
+        "logEndpoint": "",
+        "betterStack": collector["betterStack"],
+        "deploymentEnvironment": "dev",
+        "cloudRegion": "test-region",
+        "localTraceExporters": [],
+        "logExporters": [],
+    }
+    (chart / "values.yaml").write_text(yaml.safe_dump(values))
+    rendered = subprocess.run(  # noqa: S603 - fixed local Helm test chart
+        ["mise", "exec", "--", "helm", "template", "test", str(chart)],  # noqa: S607 - mise-managed Helm
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    image = collector["image"]
+    return yaml.safe_load(yaml.safe_load(rendered)["data"]["collector.yaml"]), f"{image['repository']}:{image['tag']}"
+
+
 def worker_statefulsets(tmp_path: Path, values: dict) -> list[dict]:
     result = render_workers(tmp_path, values)
     assert result.returncode == 0, result.stderr
@@ -174,6 +213,10 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
         "sie_gateway_rejected_rate_l4_default",
         "sie_gateway_model_loads_in_progress_l4_default",
     ]
+    loading = triggers[-1]["metadata"]
+    assert "max(sie_gateway_model_loads_in_progress{" in loading["query"]
+    assert "model_loads_in_progress_ratio" not in loading["query"]
+    assert loading["ignoreNullValues"] == "false"
 
     hook = render_template(tmp_path, values, "templates/hooks/keda-ready-test.yaml")
     assert hook.returncode == 0, hook.stderr
@@ -188,6 +231,37 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
     timeout = (30 * 3) + (probe_batches * 6 * 5 * 3) + 180
     assert f"TIMEOUT={timeout}" in script
     assert job["spec"]["activeDeadlineSeconds"] == timeout + 60
+
+
+@pytest.mark.parametrize("remote_enabled", [False, True])
+def test_model_loading_unit_override_is_prometheus_only(tmp_path: Path, remote_enabled: bool) -> None:
+    name = "sie.gateway.model_loads_in_progress"
+    contract = yaml.safe_load((ROOT / "telemetry/contract.yaml").read_text())
+    (metric,) = [metric for metric in contract["metrics"] if metric["name"] == name]
+    assert metric["unit"] == "1"
+    assert metric["prometheus_name"] == "sie_gateway_model_loads_in_progress"
+    assert contract["metric_processing"]["prometheus_compatibility"][name] == {
+        "unit_override": "",
+        "prometheus_name": metric["prometheus_name"],
+    }
+    config, _ = render_collector_config(tmp_path, remote_enabled=remote_enabled)
+    processors = config["processors"]
+    compatibility = processors["transform/prometheus_compatibility"]["metric_statements"]
+    assert f'set(unit, "") where name == "{name}"' in compatibility[0]["statements"]
+    canonical = processors["transform/contract_metrics"]["metric_statements"]
+    (descriptor,) = [group for group in canonical if group["context"] == "metric"]
+    assert any(
+        statement.startswith('set(unit, "1")') and "sie[.]gateway[.]model_loads_in_progress" in statement
+        for statement in descriptor["statements"]
+    )
+    pipelines = config["service"]["pipelines"]
+    for receiver in ("gateway", "application"):
+        local = pipelines[f"metrics/prometheus/{receiver}"]["processors"]
+        assert local.index("transform/contract_metrics") < local.index("transform/prometheus_compatibility")
+        if remote_enabled:
+            assert (
+                "transform/prometheus_compatibility" not in pipelines[f"metrics/betterstack/{receiver}"]["processors"]
+            )
 
 
 def test_scaledobject_apply_hook_also_runs_on_rollback(tmp_path: Path) -> None:
@@ -3819,13 +3893,14 @@ def older_version(version: str) -> str:
     return f"v{major}.{minor}.{patch - 1}" if patch else f"v{major}.{minor - 1}.0" if minor else f"v{major - 1}.0.0"
 
 
-def test_worker_auth_refuses_a_worker_image_tag_older_than_the_chart(tmp_path: Path) -> None:
-    tag = older_version(chart_app_version())
-    workers = {"auth": {"enabled": True}, "common": {"image": {"tag": tag}}, **L4_POOL["workers"]}
-    error = render_error(tmp_path, {"workers": workers})
-    assert f"workers.common.image.tag={tag} is older" in error
-    workers["auth"]["allowUnauthenticated"] = True
-    assert f"workers.common.image.tag={tag} is older" in render_error(tmp_path, {"workers": workers})
+def worker_auth_requirements(docs: list[dict]) -> dict[str, list[str]]:
+    return {
+        f"{doc['metadata']['name']}/{container['name']}": requirements
+        for doc in docs
+        if doc["kind"] in {"Deployment", "StatefulSet"}
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        if (requirements := [arg for arg in container.get("args", []) if arg.startswith("--require-auth-mode=")])
+    }
 
 
 @pytest.mark.parametrize(
@@ -3835,13 +3910,89 @@ def test_worker_auth_refuses_a_worker_image_tag_older_than_the_chart(tmp_path: P
         ({"enabled": True}, "same"),
         ({"enabled": True}, "v99.0.0"),
         ({"enabled": True}, "main"),
+        ({"enabled": True}, "older"),
         ({}, "older"),
     ],
 )
-def test_worker_image_tags_that_enforce_or_cannot_be_compared_render(
+def test_worker_auth_requires_runtime_capability_independently_of_image_tag(
     tmp_path: Path, auth: dict, tag: str | None
 ) -> None:
     version = chart_app_version()
     tags = {"same": version, "older": older_version(version)}
     common = {"image": {"tag": tags.get(tag, tag)}} if tag else {}
-    rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})
+    expected = {L4_WORKER: ["--require-auth-mode=token"]} if auth.get("enabled") else {}
+    assert worker_auth_requirements(docs) == expected
+
+
+@pytest.mark.parametrize("tag", [None, "v0.10.1"], ids=["default-image", "explicit-v0.10.1"])
+@pytest.mark.parametrize("allow_unauthenticated", [False, True], ids=["enforced", "upgrade-step"])
+def test_worker_auth_requires_capability_for_default_and_legacy_image_tags(
+    tmp_path: Path, tag: str | None, allow_unauthenticated: bool
+) -> None:
+    common = {"image": {"tag": tag}} if tag is not None else {}
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": allow_unauthenticated},
+        "common": common,
+        **L4_POOL["workers"],
+    }
+    docs = rendered_documents(tmp_path, {"workers": workers})
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(docs) == {L4_WORKER: [f"--require-auth-mode={mode}"]}
+
+
+@pytest.mark.parametrize("allow_unauthenticated", [False, True])
+def test_worker_auth_capability_covers_every_python_child_even_at_zero_replicas(
+    tmp_path: Path, allow_unauthenticated: bool
+) -> None:
+    pools = {
+        "l4": {
+            "enabled": True,
+            "gpu": {"count": 2},
+            "bundles": {"default": {"minReplicas": 0, "maxReplicas": 1}},
+        },
+        "cpu": {
+            "enabled": True,
+            "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}},
+        },
+    }
+    auth = {"enabled": True, "allowUnauthenticated": allow_unauthenticated}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "pools": pools}})
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(docs) == {
+        "sie-sie-cluster-worker-l4-default/worker-0": [f"--require-auth-mode={mode}"],
+        "sie-sie-cluster-worker-l4-default/worker-1": [f"--require-auth-mode={mode}"],
+        "sie-sie-cluster-worker-cpu-default/worker": [f"--require-auth-mode={mode}"],
+    }
+    (lane,) = [doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"].endswith("l4-default")]
+    assert lane["spec"]["replicas"] == 0
+
+
+@pytest.mark.parametrize("allow_unauthenticated", [False, True])
+def test_worker_auth_capability_covers_the_remote_lane(tmp_path: Path, allow_unauthenticated: bool) -> None:
+    values = remote_pool_values()
+    values["workers"]["auth"] = {"enabled": True, "allowUnauthenticated": allow_unauthenticated}
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(rendered_documents(tmp_path, values)) == {
+        "sie-sie-cluster-worker-remote-remote/worker": [f"--require-auth-mode={mode}"],
+    }
+
+
+def test_worker_auth_hook_failure_recommends_the_required_capability(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    (job,) = [doc for doc in docs if doc["kind"] == "Job" and doc["metadata"]["name"] == WORKER_AUTH_TEST_JOB]
+    script = job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert "Use worker images that support serve --require-auth-mode=token." in script
+    assert "same release as the chart" not in script
+
+
+@pytest.mark.parametrize("tag", [None, "v0.10.1"], ids=["default-image", "explicit-v0.10.1"])
+@pytest.mark.parametrize("auth", [{}, {"enabled": False}], ids=["default-auth", "explicit-auth-off"])
+def test_worker_auth_off_preserves_existing_image_compatibility(tmp_path: Path, tag: str | None, auth: dict) -> None:
+    common = {"image": {"tag": tag}} if tag is not None else {}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})
+    env = container_env(docs, "sie-sie-cluster-worker-l4-default", "worker")
+    assert env["SIE_AUTH_MODE"] == {"name": "SIE_AUTH_MODE", "value": "none"}
+    assert "SIE_AUTH_TOKEN" not in env
+    assert WORKER_AUTH_TEST_JOB not in hook_jobs(docs)
+    assert worker_auth_requirements(docs) == {}

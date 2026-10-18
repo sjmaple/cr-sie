@@ -27,6 +27,7 @@ import hashlib
 import logging
 import shlex
 from collections.abc import Iterable
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -42,6 +43,7 @@ from sie_sdk.bundle_utils import (
 )
 
 import sie_server
+from sie_server.api.decisions import router as decisions_router
 from sie_server.api.generate import router as generate_router
 from sie_server.api.openai_audio import router as openai_audio_router
 from sie_server.app.app_state_config import (
@@ -150,6 +152,11 @@ _SECURE_DEFAULTS_RELEASE = "0.13.0"
 SERVER_HOST_ENV = "SIE_SERVER_HOST"
 
 
+class RequiredAuthMode(StrEnum):
+    NONE = "none"
+    TOKEN = "token"  # noqa: S105 - an authentication mode, not a credential
+
+
 def _stderr_is_terminal() -> bool:
     return sys.stderr.isatty()
 
@@ -178,7 +185,9 @@ def _echo_generated_token(stored: StoredToken, port: int) -> None:
     typer.echo("\n".join([rule, *lines, rule]), err=True)
 
 
-def _prepare_auth(*, host: str, port: int, host_is_default: bool) -> AuthMode:
+def _prepare_auth(
+    *, host: str, port: int, host_is_default: bool, require_auth_mode: RequiredAuthMode | None = None
+) -> AuthMode:
     """Resolve the server's auth mode, provision its token, and warn about exposure."""
     exposed = not is_loopback_host(host)
     requested = requested_mode(os.environ)
@@ -190,6 +199,10 @@ def _prepare_auth(*, host: str, port: int, host_is_default: bool) -> AuthMode:
     except AuthConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
+
+    if require_auth_mode is not None and mode != require_auth_mode.value:
+        typer.echo("Error: resolved authentication mode does not match --require-auth-mode", err=True)
+        raise typer.Exit(1)
 
     if mode == "token" and tokens:
         typer.echo(f"Auth: every route except /healthz, /livez and /readyz requires one of {len(tokens)} token(s)")
@@ -404,6 +417,7 @@ def openapi_export(
     from sie_server.api.openapi import setup_custom_openapi_schema
     from sie_server.api.root import router as root_router
     from sie_server.api.score import router as score_router
+    from sie_server.api.systemone import router as systemone_router
     from sie_server.api.ws import router as ws_router
 
     # Build a lightweight FastAPI app for the PUBLISHED API surface — no lifespan (no GPU
@@ -429,6 +443,8 @@ def openapi_export(
     app_.include_router(openai_router)
     app_.include_router(openai_completions_router)
     app_.include_router(openai_responses_router)
+    app_.include_router(systemone_router)
+    app_.include_router(decisions_router)
     setup_custom_openapi_schema(app_)
 
     spec = app_.openapi()
@@ -497,6 +513,13 @@ def serve(
                 "Global switch for remote profiles. Off refuses every remote profile and sends nothing upstream. "
                 f"Without the flag, {REMOTE_SERVING_ENV} decides: unset means on, anything unrecognised means off."
             ),
+        ),
+    ] = None,
+    require_auth_mode: Annotated[
+        RequiredAuthMode | None,
+        typer.Option(
+            "--require-auth-mode",
+            help="Require the resolved authentication mode without changing its configuration.",
         ),
     ] = None,
 ) -> None:
@@ -740,6 +763,7 @@ def serve(
         host=host,
         port=port,
         host_is_default=_parameter_source("host") in (None, ParameterSource.DEFAULT),
+        require_auth_mode=require_auth_mode,
     )
 
     typer.echo(f"Starting SIE server on {host}:{port}")

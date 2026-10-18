@@ -886,6 +886,11 @@ class ModelConfig(BaseModel):
     _synthetic_profile_variant_source: tuple[str, str] | None = PrivateAttr(default=None)
 
     sie_id: str
+    # One line about the model, and the date its served weights were released
+    # (YYYY-MM-DD). /v1/models reports both, as the System One API's model list
+    # does, so System One clients can list SIE's models.
+    description: str | None = None
+    release_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     hf_id: str | None = None
     hf_revision: str | None = None
     hf_tokenizer_dependencies: dict[str, str] = Field(default_factory=dict)
@@ -1284,6 +1289,22 @@ class ModelConfig(BaseModel):
                     profile=profile,
                     parent=self.profiles[profile.extends] if profile.extends is not None else None,
                 )
+
+        for name in self.profiles:
+            loadtime = self._resolve_profile_uncached(name).loadtime
+            if "preload_loras" not in loadtime:
+                continue
+            preload = loadtime["preload_loras"]
+            paths = loadtime.get("lora_paths")
+            if (
+                not isinstance(paths, dict)
+                or not paths
+                or not isinstance(preload, list)
+                or any(not isinstance(alias, str) or not alias for alias in preload)
+                or len(preload) != len(set(preload))
+                or not set(preload).issubset(paths)
+            ):
+                raise ValueError(f"Profile '{name}' preload_loras must contain unique declared lora_paths names")
 
         return self
 
