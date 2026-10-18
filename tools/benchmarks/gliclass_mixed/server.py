@@ -26,6 +26,7 @@ from sie_server.adapters import gliclass
 from sie_server.adapters.gliclass import GLiClassAdapter
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
+from sie_server.core import batcher
 from sie_server.core.worker import ModelWorker, model_worker
 
 from tools.benchmarks.gliclass_mixed.evidence import Journal, atomic_json, digest, error_chain, parent_guard
@@ -148,7 +149,13 @@ class Observers:
 
 def imported_sources(root: Path) -> dict:
     result = {}
-    for name, module in (("worker", model_worker), ("gliclass", gliclass), ("sdk", sie_sdk), ("config", sie_config)):
+    for name, module in (
+        ("batcher", batcher),
+        ("worker", model_worker),
+        ("gliclass", gliclass),
+        ("sdk", sie_sdk),
+        ("config", sie_config),
+    ):
         path = Path(module.__file__).resolve()
         if not path.is_relative_to(root):
             raise AssertionError(f"{name} import escaped immutable source: {path}")

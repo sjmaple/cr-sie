@@ -27,7 +27,14 @@ from transformers import DebertaV2Config, PreTrainedTokenizerFast
 from tools.benchmarks.gliclass_mixed import client
 from tools.benchmarks.gliclass_mixed.analyze import ATOL, audit, compare, request_accounting
 from tools.benchmarks.gliclass_mixed.evidence import Journal, digest, percentile
-from tools.benchmarks.gliclass_mixed.prepare import BASELINE, PROFILE, PROFILE_REVISION, prepare
+from tools.benchmarks.gliclass_mixed.prepare import (
+    BASELINE,
+    PROFILE,
+    PROFILE_REVISION,
+    SOURCE_PATHS,
+    prepare,
+    prepare_progress,
+)
 from tools.benchmarks.gliclass_mixed.run import archive_sources, source_environment, stop, switch, wait_json
 from tools.benchmarks.gliclass_mixed.server import GLiClassAdapter, ModelWorker, Observers
 from tools.benchmarks.gliclass_mixed.workload import GROUPS, LABELS, MODEL, items, mixed_kinds, templates
@@ -546,9 +553,11 @@ server.main()
     assert (output / "server-terminal.json").is_file()
 
 
-def test_real_tiny_gliclass_server_sdk_and_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("comparison", ["profile", "progress"])
+def test_real_tiny_gliclass_server_sdk_and_cleanup(tmp_path: Path, comparison: str) -> None:
     checkpoint = tiny_checkpoint(tmp_path / "model")
-    prepare(ROOT, tmp_path / "inputs")
+    freeze = prepare_progress if comparison == "progress" else prepare
+    freeze(ROOT, tmp_path / "inputs")
     output = tmp_path / "experiment"
     command = [
         sys.executable,
@@ -583,6 +592,10 @@ def test_real_tiny_gliclass_server_sdk_and_cleanup(tmp_path: Path) -> None:
     assert not analyzed["scoped_fix_observed"]
     for arm in ("baseline", "candidate"):
         record = json.loads((output / arm / "arm.json").read_text())
+        assert (record["ready"]["adaptive"] is not None) == (comparison == "progress" or arm == "baseline")
+        assert record["ready"]["source"]["batcher"]["sha256"] == digest(
+            output / "sources" / arm / SOURCE_PATHS["batcher"]
+        )
         assert record["completed"]
         assert record["server_cleanup"]["reaped"]
         assert not record["server_cleanup"]["forced"]

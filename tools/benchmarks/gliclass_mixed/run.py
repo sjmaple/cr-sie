@@ -1,4 +1,4 @@
-"""Run both immutable GLiClass profile arms on one machine, preserving partial evidence.
+"""Run both immutable GLiClass comparison arms, preserving partial evidence.
 
 This is a descriptive reproduction, not a statistical non-inferiority test.
 """
@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from tools.benchmarks.gliclass_mixed.evidence import atomic_json, digest, error_chain, parent_guard, process_identity
-from tools.benchmarks.gliclass_mixed.prepare import PROFILE
+from tools.benchmarks.gliclass_mixed.prepare import PROFILE, PROGRESS_PATHS, SOURCE_PATHS, executable_ast
 from tools.benchmarks.gliclass_mixed.workload import MODEL, RUNNER_CEILING
 
 HARNESS_ROOT = Path(__file__).resolve().parents[3]
@@ -120,10 +120,32 @@ def archive_sources(inputs: Path, output: Path) -> dict[str, Path]:
     differences = [
         path for path in sorted(paths) if digest(sources["baseline"] / path) != digest(sources["candidate"] / path)
     ]
-    if differences != [PROFILE]:
+    progress = manifest.get("comparison") == "batcher_progress"
+    expected = PROGRESS_PATHS if progress else [PROFILE]
+    if differences != expected:
         raise AssertionError(f"unexpected source delta: {differences}")
-    atomic_json(output / "source-verification.json", {"manifest": manifest, "only_changed_path": differences})
+    if progress:
+        if manifest.get("changed_paths") != expected or manifest.get("candidate_is_derived_archive") is not False:
+            raise AssertionError("invalid whole-source progress manifest")
+        worker = SOURCE_PATHS["worker"]
+        if executable_ast((sources["baseline"] / worker).read_bytes()) != executable_ast(
+            (sources["candidate"] / worker).read_bytes()
+        ):
+            raise AssertionError("worker executable code differs")
+        profile = yaml.safe_load((sources["baseline"] / PROFILE).read_text())
+        if profile["profiles"]["default"].get("adaptive_batching", {}).get("enabled", True) is not True:
+            raise AssertionError("progress comparison requires adaptive batching in both arms")
+    atomic_json(output / "source-verification.json", {"manifest": manifest, "changed_paths": differences})
     return sources
+
+
+def validate_ready_sources(ready: dict, source: Path, profile: dict) -> None:
+    expected = {name: {"path": path, "sha256": digest(source / path)} for name, path in SOURCE_PATHS.items()}
+    if ready["source"] != expected:
+        raise AssertionError("actual imported source differs from the assigned immutable arm")
+    adaptive = profile["profiles"]["default"].get("adaptive_batching", {}).get("enabled", True)
+    if (ready["adaptive"] is not None) != adaptive:
+        raise AssertionError("loaded worker adaptive state differs from its archived profile")
 
 
 def arm_run(args: argparse.Namespace, arm: str, source: Path, deadline: float) -> dict:
@@ -181,8 +203,7 @@ def arm_run(args: argparse.Namespace, arm: str, source: Path, deadline: float) -
         )
         reservation.close()
         ready = wait_json(output / "ready.json", server, min(180, deadline - time.monotonic() - 45))
-        if (ready["adaptive"] is not None) != (arm == "baseline"):
-            raise AssertionError("loaded worker adaptive state differs from the assigned profile arm")
+        validate_ready_sources(ready, source, profile)
         if not args.smoke and ready["dtype"] != "torch.float16":
             raise AssertionError("GPU run did not use the fixed FP16 precision")
         record["ready"] = ready
@@ -290,7 +311,6 @@ def main() -> None:
             "device",
             "gpu_name",
             "threads",
-            "source",
             "checkpoint_path",
             "checkpoint_revision",
             "cuda_graphs",
