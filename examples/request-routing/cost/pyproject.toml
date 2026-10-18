@@ -26,6 +26,9 @@ dev = [
 analysis = [
     "matplotlib>=3.10,<4",
 ]
+grading = [
+  "math-verify[antlr4_13_2]==0.9.0",
+]
 posttrain = [
   "laya==0.3.29",
   "peft==0.18.1",

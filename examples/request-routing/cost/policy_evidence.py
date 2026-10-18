@@ -24,6 +24,8 @@ FILES = (
     "main/teacher-order-invalid.json",
     "main/dev-embeddings/plan.json",
     "main/dev-embeddings/vectors.jsonl.gz",
+    "main/dev-embeddings/calls.jsonl",
+    "main/dev-embeddings/collection.json",
     "main/test-embeddings/plan.json",
     "main/test-embeddings/vectors.jsonl.gz",
     "main/test-reranker/scores.jsonl",

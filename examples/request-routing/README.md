@@ -12,13 +12,18 @@ from **71.7% to 89.6%**, reducing errors **145 → 53**. Adding feedback from 64
 
 Students train the classifier themselves, freeze it, evaluate it, and route a new
 request using SIE Cloud or a local SIE server. Training reuses recorded vectors;
-serving needs one embedding call and a local dot product. The exercise measures
-routing accuracy, not downstream answer quality or dollar savings.
+serving needs one embedding call and a local dot product. The core exercise
+measures routing accuracy. The separate [economic capstone](./cost/ECONOMICS.md)
+trains from teacher reviews and compares real answering-model quality and costs.
+That separate primary experiment saves 4.7% with a 1.95-point answer-accuracy
+loss; it does not establish large savings at unchanged answer quality.
 
 - [One-page walkthrough](./WORKSHOP.md): install, learn, evaluate, use.
 - [Course guide](./cost/README.md): structure, static/improving modes, local serving and extensions.
 - [Measured results and dataset](./cost/DIFFICULTY_POLICY.md): methods, confidence intervals and public evidence.
 - [Decision-model post-training](./cost/POSTTRAIN.md): native Laya full fine-tuning and encoder LoRA.
+- [Teacher feedback and actual answer costs](./cost/ECONOMICS.md): paired Qwen4B/27B answers,
+  blinded 27B reviews, frozen policies, independent scoring and credit receipts.
 - [Original handler cascade](./CASCADE.md), [direct classification](./direct), and
   [earlier cost-routing study](./cost/LEGACY_COST.md) are separate examples retained for reference.
 

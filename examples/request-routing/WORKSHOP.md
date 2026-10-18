@@ -57,6 +57,8 @@ This makes **one embedding call**, prints its actual credit receipt and applies
 your local classifier. Our two single-request checks used 2 credits each.
 More feedback adds no inference calls per routed request. The app receives a
 route; calling a downstream answering model is a separate application step.
+The [economic capstone](./cost/ECONOMICS.md) supplies that full route → answer
+pipeline and measures answer correctness and actual credits independently.
 For your own SIE server, use `SIE_BASE_URL` and `--self-hosted`; see the
 [local-server instructions](./cost/README.md#run-your-own-sie-server).
 
@@ -81,6 +83,11 @@ uv run --frozen python replay_posttrain.py
 
 Optional GPU instructions reproduce training and serve the released checkpoints
 through local SIE. The embedding classifier remains the most accurate recipe.
+
+The optional [teacher-feedback and cost lab](./cost/ECONOMICS.md) also runs end to
+end, including real answers. Its primary saves **4.7%** with a **1.95-point answer
+accuracy loss**; it did not meet the 25%-saving/1-point-loss target. Keep this
+measured tradeoff separate from the successful difficulty-learning exercise.
 
 **Deployment loop:** collect reviewed feedback → embed new examples once →
 refit → validate → freeze weights and cutoff together → deploy the accepted policy.

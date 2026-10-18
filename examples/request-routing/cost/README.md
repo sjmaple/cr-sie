@@ -15,6 +15,7 @@ on sie-web, sie-internal, private packages, or instructor credentials.
 | Add reviewed feedback | Repeat with 128, 256 and 512 nested training labels | More training evidence; same frozen Qwen4B encoder |
 | Deploy a policy | Route recorded text, then a new request through Cloud or local SIE | One embedding call plus local arithmetic |
 | Compare alternatives | Replay Qwen4B reranking and GEPA; inspect decision-model post-training | Prompt learning versus weight learning |
+| Economic capstone | Train from blinded teacher reviews; score real paired model answers | Learn the value of using the larger model and measure its cost–quality tradeoff |
 
 Suggested timing: 5 minutes for the task, 10 for baseline and learning, 10 for
 feedback curves, 10 for deployment, and 10–20 for comparison/discussion. GPU
@@ -29,6 +30,7 @@ post-training is an extension; participants can replay its evidence.
 | Relevance reranker | Fixed class descriptions and cutoff | Recalibrate, or use GEPA to evolve descriptions |
 | Generative rubric | Fixed Qwen27B rubric | GEPA proposes rubric updates from training errors |
 | Native decision model | Fixed Laya checkpoint and question | Supervised full fine-tuning or encoder LoRA plus head training |
+| Teacher-supervised cost router | Frozen answering models, classifier and cutoff | Collect paired answers, review them without answer keys, refit and validate |
 
 Improvement is a deployment decision, not an automatic property of retraining.
 The **demonstrated gain** is embedding learning: 71.68% → 89.65% test accuracy,
@@ -104,8 +106,10 @@ includes original source files, the split, embeddings, policies, predictions and
 receipts, pinned by revision and SHA-256. `workshop.py download` verifies every
 required artifact. Generated data and checkpoints stay outside Git.
 
-The task predicts human-relative competition difficulty. It does not establish
-which LLM answers best, downstream quality retention, or generation cost savings.
+The core task predicts human-relative competition difficulty. The
+[economic capstone](./ECONOMICS.md) separately measures downstream answers and
+actual credits, including a teacher-supervised path whose fitter cannot read
+the benchmark answer keys. Difficulty accuracy is never substituted for answer quality.
 Public historical problems may have appeared in pretraining. The held-out results
 are conditional on this dataset and these trained policies.
 
