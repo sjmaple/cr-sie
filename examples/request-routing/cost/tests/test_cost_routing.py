@@ -131,7 +131,7 @@ class FakeEncoder:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
 
-    def encode(self, model: str, items: dict) -> dict:
+    def encode(self, model: str, items: dict, **kwargs) -> dict:
         self.calls.append((model, items))
         return {"dense": np.array([0.5, 0.5], dtype=np.float32)}
 
