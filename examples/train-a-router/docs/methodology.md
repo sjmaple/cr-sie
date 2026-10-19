@@ -16,6 +16,7 @@ labels are additional supervision.
 Rebuild the exact dataset from the public source with:
 
 ```sh
+# Rebuild the audited dataset from the pinned source and prior-exposure records.
 uv run --frozen --group data python data.py \
   --output run-output/rebuilt-data --previously-used evidence/prior-used-ids.json
 ```

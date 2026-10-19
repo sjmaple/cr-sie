@@ -28,12 +28,14 @@ on another device can produce different scores and checkpoint selections.
 For an NVIDIA GPU:
 
 ```sh
+# Select the NVIDIA GPU for native training and evaluation.
 export ROUTER_DEVICE=cuda
 ```
 
 For an Apple Silicon Mac:
 
 ```sh
+# Select the Apple GPU through PyTorch MPS.
 export ROUTER_DEVICE=mps
 ```
 
@@ -53,6 +55,7 @@ contain only the four development inputs. On a remote training machine, transfer
 these directories and keep test inputs for later evaluation.
 
 ```sh
+# Download verified evidence and prepare inputs for both training sizes.
 uv sync --frozen --group training
 uv run --frozen --group training python run.py fetch
 uv run --frozen --group training python run.py fetch --lora-study
@@ -76,6 +79,7 @@ creates the input directories and installs the training dependencies.
 Run the adaptation stage with the declared `original` recipe:
 
 ```sh
+# Train and freeze the 512-example LoRA router.
 uv run --frozen --group training python finetune.py train \
   --data run-output/lora-small-inputs --output run-output/my-lora512 \
   --seed 89 --recipe original --variants lora \
@@ -96,6 +100,7 @@ arrived here directly from the main walkthrough.
 Keep the recipe, selection and calibration rules, and change the training data:
 
 ```sh
+# Train the same LoRA recipe on the expanded 2,581-example dataset.
 uv run --frozen --group training python finetune.py train \
   --data run-output/lora-expanded-inputs --output run-output/my-lora2581 \
   --seed 89 --recipe original --variants lora \
@@ -111,6 +116,7 @@ examples and training for the same number of passes, not a fixed-compute study.
 After both runs have written `frozen.json`, evaluate the fixed models:
 
 ```sh
+# Evaluate both frozen routers on the unchanged test set.
 uv run --frozen --group training python finetune.py evaluate \
   --evaluation evidence/test.json --questions evidence/questions.json \
   --output run-output/my-lora512 --device "$ROUTER_DEVICE"
@@ -137,6 +143,7 @@ checks development-score parity before evaluating test cases.
 Configure SIE with the expanded checkpoint you trained and evaluated above:
 
 ```sh
+# Configure and start SIE with the router you trained.
 uv run --frozen python decision.py configure \
   --run run-output/my-lora2581 --variant lora \
   --models-dir run-output/my-lora-models
@@ -149,8 +156,9 @@ uvx --from 'sie-server[local]==0.10.0' sie-server serve \
 Wait for the model to load. In another terminal, from the same example folder:
 
 ```sh
+# Route a fresh problem and check 32 decisions against your frozen evaluation.
 export SIE_BASE_URL=http://127.0.0.1:8100
-unset SIE_API_KEY
+unset SIE_API_KEY # The local server needs no Cloud key.
 uv run --frozen python decision.py route \
   --run run-output/my-lora2581 --variant lora --contest AMC10 \
   --request 'A rectangle has perimeter 30 and length 9. What is its area?'
@@ -170,6 +178,7 @@ To try serving without training first, fetch the published seed-89 checkpoint
 (about **1.7 GB**):
 
 ```sh
+# Download the published expanded checkpoint to try serving without training.
 uv run --frozen python run.py fetch --lora-study --weights lora
 ```
 
@@ -184,6 +193,7 @@ The training steps above use the downloaded, hash-checked data. To audit its
 construction, rebuild from the pinned public Parquet source:
 
 ```sh
+# Rebuild the training data and audit from the pinned public source.
 uv run --frozen --group data python data.py \
   --source run-output/lora-source \
   --output run-output/lora-rebuilt \
@@ -203,6 +213,7 @@ family identities, and generated-file hash.
 Compare the regenerated files with the downloaded expansion:
 
 ```sh
+# Check that the rebuilt training data and audit match the published files.
 cmp run-output/lora-expansion/train-expanded.jsonl \
   run-output/lora-study/expansion/train-expanded.jsonl
 cmp run-output/lora-expansion/training-expansion-audit.json \
@@ -212,6 +223,7 @@ cmp run-output/lora-expansion/training-expansion-audit.json \
 ## Replay the recorded comparison
 
 ```sh
+# Download verified records and recompute the LoRA comparison on CPU.
 uv sync --frozen
 uv run --frozen python run.py fetch
 uv run --frozen python run.py fetch --lora-study
@@ -240,6 +252,7 @@ not create three times as many independent test cases.
 Generate the LoRA comparison figure from the same verified records:
 
 ```sh
+# Plot the validation and test results from verified LoRA records.
 uv run --frozen --group plots python plot.py \
   --lora-study run-output/lora-study --evidence evidence \
   --output run-output/lora-figures
@@ -259,6 +272,7 @@ The main training path uses the recipe already selected on development data.
 To repeat that selection, use the two development directories prepared above:
 
 ```sh
+# Run every declared recipe and seed, then train the winner on more data.
 uv sync --frozen --group training
 uv run --frozen --group training python lora_study.py \
   --data run-output/lora-small-inputs \
@@ -343,6 +357,7 @@ Wait for `ALL_LORA_RUNS_FROZEN` and `run-output/my-lora-study/all-frozen.json`.
 Then make the original evidence available on the evaluation machine and run:
 
 ```sh
+# Check runtime parity, evaluate the frozen study, and recompute its report.
 uv run --frozen --group training python lora_evaluate.py \
   --study run-output/my-lora-study --evidence evidence \
   --device "$ROUTER_DEVICE" --timeout-seconds 1800

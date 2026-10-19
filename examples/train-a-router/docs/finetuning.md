@@ -19,6 +19,7 @@ PEFT 0.18.1. A CUDA installation compatible with Torch is required. The recorded
 run uses one H100; CPU replay does not require these dependencies.
 
 ```sh
+# Install dependencies and train full and LoRA variants for all three seeds.
 uv sync --frozen --group training
 uv run --frozen --group training python finetune.py train \
   --data evidence --seed 89 --output run-output/seed-89
@@ -37,6 +38,7 @@ disk space because it preserves checkpoints and intermediate best weights.
 After all three runs have frozen, evaluate each:
 
 ```sh
+# Evaluate the frozen seed-89 models on the test set.
 uv run --frozen --group training python finetune.py evaluate \
   --evaluation evidence/test.json --questions evidence/questions.json \
   --output run-output/seed-89

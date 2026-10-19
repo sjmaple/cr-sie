@@ -66,13 +66,17 @@ zero (−1.32 to +4.59). The 512-to-2,581 comparison keeps these settings fixed.
 LoRA-study intervals average seed correctness before resampling problems or
 competition-year groups and condition on these three trained seeds.
 
-**Qwen plus ridge remains the recommended policy at 72.03%**, 7.03 points above
+**Qwen plus ridge has the highest measured accuracy at 72.03%**, 7.03 points above
 the expanded native model, using 512 training examples. The LoRA stages show a
 measurable improvement within the compact decision-model approach. Full tuning
 was only run on 512 examples, so the expanded LoRA result does not establish a
 LoRA advantage at matched training sizes.
 Difficulty accuracy does not establish downstream answer quality, latency or
-money savings. Follow the [decision-model training guide](lora-study.md) to
+money savings. A matched local serving check measured **48.77 ms** median for
+expanded Laya and **171.51 ms** for Qwen plus ridge on an M3 Max, with 32 requests
+after warmup. The [serving comparison](serving.md#measure-request-latency)
+separates this response-time tradeoff from accuracy and explains how to repeat
+the measurement. Follow the [decision-model training guide](lora-study.md) to
 replay the comparison, train both sizes, or reproduce the complete study.
 
 ## Steps 4–5: learn a classifier on frozen embeddings
@@ -161,6 +165,7 @@ promise identical live scores or generalize this prefix check to every input.
 Regenerate the comparison and overfitting figures with:
 
 ```sh
+# Regenerate the original comparison and overfitting figures.
 uv run --frozen --group plots python plot.py
 ```
 

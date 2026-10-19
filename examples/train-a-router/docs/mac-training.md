@@ -12,6 +12,7 @@ From `examples/train-a-router`, install the optional training dependencies and
 check that PyTorch can use your Apple GPU:
 
 ```sh
+# Install training dependencies, verify the Apple GPU, and select MPS.
 uv sync --frozen --group training
 uv run --frozen --group training python -c \
   'import torch; assert torch.backends.mps.is_available(); print(torch.__version__, "MPS available")'
@@ -59,6 +60,7 @@ An optional hardware regression checks outputs and gradients through the actual
 MPS profile, without downloading a model:
 
 ```sh
+# Check MPS forward outputs and gradients without downloading model weights.
 uv run --frozen --group training python -m unittest discover \
   -s tests -p test_mps_training.py -v
 ```
