@@ -26,7 +26,7 @@ def main():
             child.add_argument(
                 "--lora-study",
                 action="store_true",
-                help="Fetch the separate LoRA follow-up; defaults to --evidence run-output/lora-study",
+                help="Fetch the LoRA training study; defaults to --evidence run-output/lora-study",
             )
         elif command == "collect":
             child.add_argument("--split", choices=("development", "test"), required=True)

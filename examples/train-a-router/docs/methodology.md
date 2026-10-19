@@ -9,7 +9,7 @@ time. Year, question number, rating, answer and solution are excluded from input
 `data.py` pins the source revision and hashes, builds the labels, identifies
 duplicate families and writes the split audit. A label is above/below the median
 rating for that competition, fitted only on the eligible pre-2018 source
-population. Thus 64–512 is the number of **classifier training labels**, not the
+population. Thus 64–512 (or 2,581 for expanded LoRA) counts **model training labels**, not the
 total annotation cost of defining this benchmark. Validation and calibration
 labels are additional supervision.
 
@@ -27,7 +27,7 @@ exposure so those families cannot be called a fresh test.
 
 | Partition | Years | Problems | Role |
 | --- | --- | ---: | --- |
-| Training | Through 2017 | 512 | Nested budgets of 64, 128, 256, 512 |
+| Training | Through 2017 | 512; 2,581 for expanded LoRA | Nested budgets; the first 512 rows are unchanged |
 | Validation | 2018 | 247 | Ridge regularization and native checkpoint selection |
 | Calibration | 2019 | 246 | Decision cutoff, after model selection |
 | Test | 2020 onward | 479 | Frozen comparison only |
@@ -62,18 +62,27 @@ one embedding and 2,561 local coefficients. Feedback collection and retraining
 are separate, one-time costs. kNN instead keeps a larger example bank. Neither
 approach changes the embedding model's per-request computation as labels grow.
 
-**Laya:** a 421M-parameter ModernBERT-large encoder plus a native decision head
-scores a typed two-option question without generating text. Full fine-tuning
+**Laya:** a roughly 421M-parameter model combining a ModernBERT-large encoder
+with its native decision head scores a typed two-option question without
+generating text. Full fine-tuning
 updates the complete checkpoint. LoRA trains rank-16 adapters on encoder
 attention `Wqkv`/`Wo` **and the entire decision head**: 29.3M trainable parameters,
 including 2.75M encoder adapter parameters. This is not head-only training.
 Adapters are merged into an ordinary Laya checkpoint for serving.
 
-Every native run uses eight epochs and the same data order seed, effective batch
-16, 512-token input limit and 256-token question budget. Validation cross-entropy
-selects an epoch; a separate calibration partition selects the cutoff by balanced
-accuracy on the serialized checkpoint. Full encoder/head learning rates are
-2.5e-5/1e-4; LoRA uses 2e-4/1e-4.
+Every fine-tuning run uses eight epochs, a declared data-order seed, effective batch
+16, a 512-token input limit and a 256-token question budget. In the main LoRA
+stages, validation AUC selects the epoch; separate calibration chooses the cutoff
+by balanced accuracy after FP32 serialization. Six recipes are screened only on
+development data, then the selected recipe is fixed for expanded training.
+The original rank-16 recipe wins; its adapter/head learning rates are 2e-4/1e-4.
+Adding examples at the same epoch count increases optimizer updates as well as
+training data. See the [LoRA guide](lora-study.md) for the complete protocol.
+
+The historical full-tuning versus LoRA comparison instead selects epochs by
+validation cross-entropy and exports FP16. Its full encoder/head learning rates
+are 2.5e-5/1e-4; LoRA uses 2e-4/1e-4. Those older results are reported separately
+and are not substituted for the main LoRA stages.
 The comparison evaluates these declared recipes, not the best possible fully
 tuned recipe for each architecture. Three seeds are a stability check, not an
 exhaustive hyperparameter search.

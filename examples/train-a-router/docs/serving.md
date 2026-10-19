@@ -32,9 +32,47 @@ precision can change numerical scores. Fresh serving observations are separate
 from replay of the pinned recordings. For bulk local collection, add
 `--self-hosted` to `run.py collect`; local responses need not have Cloud receipts.
 
-## Serve the smaller decision model
+## Collect embeddings and retrain
 
-Download the predeclared seed-89 checkpoint or substitute your own frozen run:
+Set your Cloud key as in [step 6](../README.md#6-route-fresh-requests-through-sie),
+or start a local server and set its endpoint as above. Collect development
+vectors and fit the classifier before collecting the test vectors:
+
+```sh
+uv run --frozen python run.py collect --split development \
+  --output run-output/fresh-development
+uv run --frozen python run.py train --embeddings run-output/fresh-development \
+  --policies run-output/fresh-policies
+```
+
+Once `run-output/fresh-policies/frozen.json` exists, collect and evaluate test
+vectors. Use the **same policy directory** as the training command:
+
+```sh
+uv run --frozen python run.py collect --split test \
+  --output run-output/fresh-test
+uv run --frozen python run.py evaluate --embeddings run-output/fresh-test \
+  --policies run-output/fresh-policies
+```
+
+For local collection, add `--self-hosted` to both `collect` commands. Collection
+sends batches of 16, disables automatic inference retries and saves receipts.
+Use new output directories for another run. To serve the newly fitted classifier,
+pass `--policy run-output/fresh-policies/ridge512.json` to `run.py route`.
+
+## Serve the adapted decision model
+
+For the main walkthrough's 2,581-example LoRA model, follow
+[serve the downloaded router](lora-study.md#serve-the-downloaded-router-locally).
+Those commands fetch its FP32 seed-89 checkpoint, configure SIE, route a request,
+and check 32 decisions against its recorded evaluation. You can also substitute
+your own frozen training output.
+
+### Serve the historical 512-example checkpoints
+
+The commands below serve the original full-fine-tuning comparison, which uses
+different weights from the main LoRA stage. Download the predeclared seed-89
+checkpoint or substitute your own frozen run:
 
 ```sh
 uv run --frozen python run.py fetch --weights full
@@ -56,15 +94,15 @@ uv run --frozen python decision.py route --run evidence/native/seed-89 \
   --request 'A rectangle has perimeter 30 and length 9. What is its area?'
 ```
 
-For LoRA, use `--weights lora`, `--variant lora`, and model ID
+For the historical LoRA checkpoint, use `--weights lora`, `--variant lora`, and model ID
 `example/laya-difficulty-lora`. The adapter is already merged into native weights.
 The SDK request supplies the same typed question as training. The script converts
 the frozen logit-margin cutoff to SIE's option-score scale; choosing the raw top
 option would deploy a different classifier. Seed 89 is the documented serving
 example by convention, not a seed selected from test performance.
 
-Stop each local server with Ctrl-C. These custom checkpoints are a self-hosted
-extension; the Cloud exercise uses the publicly served Qwen encoder.
+Stop each local server with Ctrl-C. These custom checkpoints use self-hosted
+SIE; the Cloud exercise uses the publicly served Qwen encoder.
 
 To compare the first 32 test decisions with the recorded GPU reference, run
 `uv run --frozen python check_serving.py --variant full --output

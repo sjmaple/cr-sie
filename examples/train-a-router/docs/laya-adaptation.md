@@ -74,7 +74,7 @@ factor. The public QQP result supports feasibility, not an expected accuracy
 gain on this dataset.
 
 Select checkpoints for the routing decision. Validation ranking continued to
-improve after raw cross-entropy deteriorated in the initial runs. The follow-up
+improve after raw cross-entropy deteriorated in the initial runs. The LoRA study
 therefore selects maximum validation ROC AUC, retaining the earlier epoch on
 ties, and fits the decision cutoff on separate calibration data. It retains
 cross-entropy and training loss as diagnostics. AUC selection is a declared
@@ -96,5 +96,5 @@ only 9/512 training and 4/247 validation examples exceed the native input
 budget, so context length is not the first intervention.
 
 The already-published 479-case test is an **exposed regression benchmark** for
-this follow-up. New recipes are chosen without its outcomes, but a fresh
+this LoRA study. New recipes are chosen without its outcomes, but a fresh
 temporal generalization claim still requires additional evaluation data.

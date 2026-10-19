@@ -7,7 +7,8 @@ There are two independent examples:
   supplied handler labels. Its `cost/` directory is a separately installable,
   historical cheap/strong LLM cost study.
 - [`train-a-router`](../README.md): learn and serve a difficulty decision, with
-  one environment, one evaluation path and an optional fine-tuning lab.
+  one environment and a progression from LoRA adaptation of Laya to a learned
+  classifier on frozen Qwen embeddings.
 
 The earlier experimental workspace combined several different targets: handler
 intent, downstream answer success, global mathematics difficulty and relative

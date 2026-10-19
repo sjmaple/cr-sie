@@ -1,4 +1,4 @@
-"""Plot the original comparison, or the verified follow-up with --lora-study."""
+"""Plot the original comparison, or the verified LoRA training study with --lora-study."""
 
 import argparse
 import json
@@ -85,7 +85,7 @@ def plot_lora(plt, result, output):
         fontsize=9,
         transform=footer.transAxes,
     )
-    fig.suptitle(f"LoRA follow-up · {result['n']} exposed regression problems", fontsize=14)
+    fig.suptitle(f"LoRA training · {result['n']} exposed regression problems", fontsize=14)
     for extension in ("png", "svg"):
         fig.savefig(output / f"lora-study.{extension}", dpi=180)
     plt.close(fig)
@@ -100,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, default=Path("evidence"))
     parser.add_argument("--output", type=Path, default=Path("run-output/figures"))
-    parser.add_argument("--lora-study", type=Path, help="Plot a complete follow-up using its verified records")
+    parser.add_argument("--lora-study", type=Path, help="Plot the LoRA training study using its verified records")
     args = parser.parse_args()
     followup = summarize_lora(args.lora_study, args.evidence) if args.lora_study else None
     args.output.mkdir(parents=True, exist_ok=False)

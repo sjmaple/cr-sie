@@ -1,10 +1,88 @@
-# Results on the corrected evaluation
+# Results for the router walkthrough
+
+The [walkthrough](../README.md) starts with a decision model, improves it with
+LoRA and more examples, then compares it with a classifier on frozen embeddings.
+
+| Stage | Model | Training examples | Accuracy |
+| --- | --- | ---: | ---: |
+| 1. Starting decision model | Calibrated base Laya | Unchanged weights | 53.65% |
+| 2. Adapt the decision model | Laya + LoRA + trained native head | 512 | 57.34% mean |
+| 3. Add native training examples | Same LoRA recipe | 2,581 | 65.00% mean |
+| 4. Change to frozen embeddings | Qwen3-Embedding-4B + ridge | 64 | 67.64% |
+| 5. Add classifier training examples | Same encoder and classifier family | 512 | 72.03% |
+
+These are measured designs, not a matched-budget causal ablation. Training
+counts exclude the shared 247 validation and 246 calibration examples, as well
+as the labels used to define competition-relative difficulty. The native model
+has roughly 421M parameters; the frozen Qwen encoder has 4B. LoRA values average
+seeds 89, 137 and 211; base Laya is one deterministic checkpoint.
+
+Every stage uses the same 479 chronological, duplicate-family-isolated problems.
+They were held out for the original frozen comparison and reused as an **exposed
+regression benchmark** for LoRA development. A new prospective generalization
+claim requires a new evaluation population. Neither task accuracy nor model size
+alone establishes downstream solver quality, latency or monetary savings.
+
+## Step 1: measure calibrated Laya
+
+Base Laya scores **53.65%** after fitting its cutoff on the calibration split.
+Its pretrained weights are unchanged, but this is not a label-free zero-shot
+baseline. The main LoRA stages below use AUC selection and FP32 export, while
+the historical base recording uses the original export/runtime protocol. The
+512-to-2,581 LoRA comparison keeps those settings fixed.
+
+## Steps 2–3: adapt Laya and add training examples
+
+[Pinned LoRA evidence and checkpoints](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup)
+· [Comparison figure](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup/figures/lora-study.png).
+
+Expanding training from **512 to 2,581 examples** improves the native router from
+**57.34% to 65.00%** mean accuracy across three seeds: **+7.65 percentage points**
+and **17.9% fewer errors**. The paired problem-bootstrap 95% interval is
+**+3.20 to +12.04 points**; the competition-year interval is +2.66 to +11.70.
+This study uses the same 479 problems as an **exposed regression benchmark**,
+so it measures progress on that benchmark rather than a new prospective test.
+
+| Training examples, same LoRA recipe | Seed 89 | Seed 137 | Seed 211 | Mean |
+| --- | ---: | ---: | ---: | ---: |
+| 512, AUC selection, FP32 export | 57.41% | 57.83% | 56.78% | **57.34%** |
+| 2,581, AUC selection, FP32 export | 66.60% | 62.42% | 65.97% | **65.00%** |
+
+Six declared recipes were screened on validation AUC across all three seeds.
+The original rank-16 attention-adapter recipe with a trained native head won;
+the alternatives did not improve mean validation AUC. That recipe was frozen
+before the expanded training runs. Epoch selection uses 2018 validation data,
+and each cutoff uses separate 2019 calibration data. Seed 89 was fixed as the
+serving example before test evaluation; it was not chosen for its final accuracy.
+The unchanged eight-epoch schedule gives the larger dataset more optimizer
+updates, so this improvement includes additional training compute.
+
+The historical LoRA baseline below scores 55.74%. Its new 512-example control
+scores 57.34%, but changes both checkpoint selection from cross-entropy to AUC
+and export precision from FP16 to FP32. Evaluation also switches to eager
+execution after checking development-score parity. The +1.60-point difference
+cannot be attributed to AUC selection alone; its paired 95% interval includes
+zero (−1.32 to +4.59). The 512-to-2,581 comparison keeps these settings fixed.
+LoRA-study intervals average seed correctness before resampling problems or
+competition-year groups and condition on these three trained seeds.
+
+**Qwen plus ridge remains the recommended policy at 72.03%**, 7.03 points above
+the expanded native model, using 512 training examples. The LoRA stages show a
+measurable improvement within the compact decision-model approach. Full tuning
+was only run on 512 examples, so the expanded LoRA result does not establish a
+LoRA advantage at matched training sizes.
+Difficulty accuracy does not establish downstream answer quality, latency or
+money savings. Follow the [decision-model training guide](lora-study.md) to
+replay the comparison, train both sizes, or reproduce the complete study.
+
+## Steps 4–5: learn a classifier on frozen embeddings
 
 [Pinned data, predictions and checkpoints](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/4136e68feaa90b5f50dce9f30df212982d393356/evaluations/2026-10-18/train-a-router-grouped-v2)
 · [Comparison figure](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/4136e68feaa90b5f50dce9f30df212982d393356/evaluations/2026-10-18/train-a-router-grouped-v2/figures/comparison.png)
 · [Learning curves](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/4136e68feaa90b5f50dce9f30df212982d393356/evaluations/2026-10-18/train-a-router-grouped-v2/figures/learning-curves.png).
 
-**The frozen Qwen4B encoder plus a learned linear classifier is the main result.**
+**The frozen Qwen4B encoder plus a learned linear classifier is the strongest
+measured classifier.**
 On 479 chronological, duplicate-family-isolated test problems, kNN with 64
 training examples reaches **59.29%** accuracy; ridge with 512 reaches **72.03%**.
 That is **+12.73 percentage points**, paired 95% interval **+7.10 to +18.37**,
@@ -62,59 +140,15 @@ The target and partitions changed, so the old and new accuracies are not an
 apples-to-apples before/after comparison. The [archive](archive.md) preserves the
 old evidence; [methodology](methodology.md) gives the corrected protocol.
 
-## LoRA follow-up: add examples to the same recipe
-
-[Pinned follow-up evidence and checkpoints](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup)
-· [Comparison figure](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup/figures/lora-study.png).
-
-Expanding training from **512 to 2,581 examples** improves the native router from
-**57.34% to 65.00%** mean accuracy across three seeds: **+7.65 percentage points**
-and **17.9% fewer errors**. The paired problem-bootstrap 95% interval is
-**+3.20 to +12.04 points**; the competition-year interval is +2.66 to +11.70.
-This follow-up uses the same 479 problems as an **exposed regression benchmark**,
-so it measures progress on that benchmark rather than a new prospective test.
-
-| Training examples, same LoRA recipe | Seed 89 | Seed 137 | Seed 211 | Mean |
-| --- | ---: | ---: | ---: | ---: |
-| 512, AUC selection, FP32 export | 57.41% | 57.83% | 56.78% | **57.34%** |
-| 2,581, AUC selection, FP32 export | 66.60% | 62.42% | 65.97% | **65.00%** |
-
-Six declared recipes were screened on validation AUC across all three seeds.
-The original rank-16 attention-adapter recipe with a trained native head won;
-the alternatives did not improve mean validation AUC. That recipe was frozen
-before the expanded training runs. Epoch selection uses 2018 validation data,
-and each cutoff uses separate 2019 calibration data. Seed 89 was fixed as the
-serving example before test evaluation; it was not chosen for its final accuracy.
-The unchanged eight-epoch schedule gives the larger dataset more optimizer
-updates, so this improvement includes additional training compute.
-
-The historical LoRA baseline above scores 55.74%. Its new 512-example control
-scores 57.34%, but changes both checkpoint selection from cross-entropy to AUC
-and export precision from FP16 to FP32. Evaluation also switches to eager
-execution after checking development-score parity. The +1.60-point difference
-cannot be attributed to AUC selection alone; its paired 95% interval includes
-zero (−1.32 to +4.59). The 512-to-2,581 comparison keeps these settings fixed.
-Follow-up intervals average seed correctness before resampling problems or
-competition-year groups and condition on these three trained seeds.
-
-**Qwen plus ridge remains the recommended policy at 72.03%**, 7.03 points above
-the expanded native model, using 512 training examples. The follow-up provides
-a working compact-model training extension and a measurable improvement within
-that approach. Full fine-tuning was only run on 512 examples, so the expanded
-LoRA result does not establish a LoRA advantage at matched training sizes.
-Difficulty accuracy does not establish downstream answer quality, latency or
-money savings. Follow the [LoRA guide](lora-study.md) to replay the comparison,
-train one router, or reproduce the complete study.
-
 ## Reproduce and use
 
 `run.py replay` retrains the embedding policies and recomputes the original
 comparison from verified public recordings. `lora_report.py` separately verifies
-the follow-up's frozen selections, runtime-parity receipts and per-case results;
+the LoRA study's frozen selections, runtime-parity receipts and per-case results;
 the [LoRA guide](lora-study.md) gives its download and replay commands.
 `finetune.py` repeats the native training experiments.
-The main README shows fresh Cloud and local SIE inference. Collected Qwen4B
-embeddings used **883 credits for 1,005 development problems** and **418 credits
+The [main walkthrough](../README.md) links fresh Cloud and local SIE inference.
+Collected Qwen4B embeddings used **883 credits for 1,005 development problems** and **418 credits
 for 479 test problems**, in batches of 16; a fresh single-request Cloud smoke
 used one credit. Cached replay uses none. These are observed embedding charges,
 not downstream LLM savings or GPU training costs.
@@ -133,6 +167,7 @@ Regenerate the comparison and overfitting figures with:
 uv run --frozen --group plots python plot.py
 ```
 
-Figures are written to `run-output/figures/`. Source data, all six native
-checkpoints, hashes, histories, calibration observations and per-case predictions
+These original comparison figures are written to `run-output/figures/`.
+Source data, all six original native checkpoints, hashes, histories,
+calibration observations and per-case predictions
 are retained in the pinned evidence downloaded by `run.py fetch`.

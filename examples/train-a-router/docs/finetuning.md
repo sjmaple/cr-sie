@@ -1,6 +1,7 @@
-# Original native-model training comparison
+# Supporting experiment: full fine-tuning versus LoRA
 
-For a compact-model training walkthrough, start with the [LoRA guide](lora-study.md).
+The main walkthrough adapts Laya with LoRA and adds training data; follow its
+[decision-model training guide](lora-study.md) for those steps.
 Keeping its selected recipe fixed and expanding training from 512 to 2,581
 examples improved mean accuracy from **57.34% to 65.00%** across three seeds,
 with **17.9% fewer errors** on the exposed regression benchmark. The guide covers
@@ -9,7 +10,7 @@ the recommended policy at 72.03%; see [results](results.md) for the comparison.
 
 The commands below reproduce the original 512-example, cross-entropy-selected
 comparison of full fine-tuning and LoRA. Those recipes average 57.48% and 55.74%
-accuracy respectively. The follow-up also changes export precision, so its
+accuracy respectively. The main LoRA study also changes export precision, so its
 512-example control is separate from this historical baseline.
 
 Use a CUDA GPU and the same downloaded dataset as the CPU exercise. The
