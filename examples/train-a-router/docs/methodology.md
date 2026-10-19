@@ -76,6 +76,12 @@ stages, validation AUC selects the epoch; separate calibration chooses the cutof
 by balanced accuracy after FP32 serialization. Six recipes are screened only on
 development data, then the selected recipe is fixed for expanded training.
 The original rank-16 recipe wins; its adapter/head learning rates are 2e-4/1e-4.
+The recorded study uses CUDA with micro-batch eight, accumulation two and
+gradient checkpointing. The Apple Silicon profile uses FP32, micro-batch one,
+accumulation 16 and no gradient checkpointing; both have effective batch 16.
+Evaluation batches are 16 on CUDA and four on MPS. These runtime differences can
+change optimization and numerical results; the [Mac guide](mac-training.md)
+reports its validation separately from the three-seed CUDA reference.
 Adding examples at the same epoch count increases optimizer updates as well as
 training data. See the [LoRA guide](lora-study.md) for the complete protocol.
 

@@ -1,153 +1,184 @@
 # Train a request router
 
-Start with a pretrained decision model, adapt it to your task with LoRA, then
-compare it with a frozen embedding model and a small learned classifier. This
-example routes mathematics problems to **routine** or **advanced**, relative to
-the named competition, using human difficulty labels from Easy2Hard-Bench.
+Adapt a decision model with LoRA, improve it with more training examples, then
+compare it with a classifier over frozen embeddings. Each step uses the same
+difficulty task and evaluation metrics.
+
+## Dataset and metrics
+
+Given a mathematics problem and its competition, predict **routine** or
+**advanced** difficulty. The labels come from human ratings in
+[Easy2Hard-Bench](https://huggingface.co/datasets/furonghuang-lab/Easy2Hard-Bench),
+relative to each competition's training-period median. Inputs contain the problem
+and competition name; answers, solutions and ratings are excluded.
+
+Training uses 512 examples, expanded to 2,581 for the larger LoRA run. Separate
+splits provide **247 validation**, **246 calibration**, and **479 test** problems.
+Duplicate families are separated across chronological partitions.
+
+- **Accuracy:** correct routine/advanced decisions divided by all 479 test
+  problems. This is the quality metric in the step headings.
+- **Balanced accuracy:** average recall for the two difficulty classes, so both
+  classes receive equal weight.
+- **Error counts:** advanced problems sent to routine, and routine problems sent
+  to advanced. Applications may assign different costs to these errors.
+- **Validation AUC:** ranks native checkpoints during training; separate
+  calibration data chooses the decision cutoff before test evaluation.
+
+The scripts print accuracy as a fraction; the headings show percentages.
+Training records also report elapsed time, and Cloud collection saves usage
+receipts. Those operational measurements are separate from classification quality.
+
+The bracketed accuracies are recorded references. LoRA values average seeds
+89, 137 and 211; the commands train seed 89 once, so your result is not a
+three-seed mean. Hardware can also affect results. This public test has been
+reused for the LoRA study and is an **exposed regression benchmark**. Model sizes
+and training budgets differ between approaches; see [results](docs/results.md)
+and [methodology](docs/methodology.md) for the comparisons and leakage checks.
 
 ## What you will build
 
-1. [Measure the starting decision model](#1-measure-the-starting-decision-model).
-   Calibrated **Laya: 53.65%** accuracy.
-2. [Adapt Laya with LoRA](#2-adapt-laya-with-lora).
-   Train on **512 examples: 57.34%** mean accuracy.
-3. [Improve the decision model with more examples](#3-improve-the-decision-model-with-more-examples).
-   Keep the recipe and grow to **2,581 examples: 65.00%** mean accuracy.
-4. [Train a classifier on frozen embeddings](#4-train-a-classifier-on-frozen-embeddings).
-   Qwen3-Embedding-4B plus ridge, **64 examples: 67.64%** accuracy.
-5. [Improve the embedding classifier with more examples](#5-improve-the-embedding-classifier-with-more-examples).
-   Grow to **512 examples: 72.03%** accuracy, the strongest result here.
-6. [Route fresh requests through SIE](#6-route-fresh-requests-through-sie).
-   Use Cloud embeddings or a local SIE server with the same learned policy.
+1. [Measure calibrated Laya [53.65%]](#1-measure-calibrated-laya-5365).
+2. [Adapt Laya on 512 examples [57.34%]](#2-adapt-laya-on-512-examples-5734).
+3. [Expand LoRA training to 2,581 examples [65.00%]](#3-expand-lora-training-to-2581-examples-6500).
+4. [Train an embedding classifier on 64 examples [67.64%]](#4-train-an-embedding-classifier-on-64-examples-6764).
+5. [Compare the 512-example embedding classifier [72.03%]](#5-compare-the-512-example-embedding-classifier-7203).
 
-LoRA is part of the main walkthrough. **A laptop can replay every stage without
-a key or GPU and train the embedding classifiers on CPU.** To repeat the native
-LoRA training itself, follow the CUDA commands in the linked training guide.
+## Prerequisites and shared setup
 
-All accuracies use the same 479 problems; LoRA results average three seeds. This
-is a comparison of practical designs with different training budgets and model
-sizes. Model selection and cutoff calibration use separate development splits.
-The benchmark is now public and was reused for the LoRA study; it is an exposed regression
-benchmark, not a new prospective test. See [results](docs/results.md) for all
-runs and uncertainty.
+Use either an **Apple Silicon Mac** or a **CUDA GPU**, locally or on a GPU VM,
+for the Laya stages. Install
+[uv](https://docs.astral.sh/uv/getting-started/installation/) and Git, and allow
+disk space for several checkpoints. Apple Silicon uses its GPU through PyTorch
+MPS. See [Mac setup and measurements](docs/mac-training.md) for the tested
+hardware and runtime. The reference accuracies above were measured on an H100.
+On an M3 Max, the complete 512-example Mac run took **10.3 minutes** and reached
+**57.62%** accuracy, with **9.1 GiB** peak sampled GPU allocation. That machine
+had 128 GiB unified memory; smaller-memory Macs have not been validated.
 
-## Set up
+The embedding-classifier stages run on **CPU** using cached Qwen vectors. For
+fresh requests, use SIE Cloud or run the encoder on your own server. A SIE Cloud
+key covers inference; it does not provide the GPU training machine.
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git.
-From a clone of this repository, run:
+From a clone of this repository:
 
 ```sh
 cd examples/train-a-router
-uv sync --frozen
-uv run --frozen python run.py fetch
-uv run --frozen python run.py fetch --lora-study
+export ROUTER_DEVICE=mps  # Apple Silicon; use cuda for an NVIDIA GPU
+uv sync --frozen --group training
+uv run --frozen --group training python run.py fetch
+uv run --frozen --group training python run.py fetch --lora-study
+mkdir run-output/lora-small-inputs run-output/lora-expanded-inputs
+cp evidence/train.jsonl evidence/validation.jsonl evidence/calibration.jsonl \
+  evidence/questions.json run-output/lora-small-inputs/
+cp evidence/validation.jsonl evidence/calibration.jsonl evidence/questions.json \
+  run-output/lora-expanded-inputs/
+cp run-output/lora-study/expansion/train-expanded.jsonl \
+  run-output/lora-expanded-inputs/train.jsonl
 ```
 
-Python 3.12 is selected automatically. These downloads total about **28 MB** of
-pinned public data, embeddings and prediction records, with hashes checked on
-download. All code and configuration live in this folder; large artifacts live
-on Hugging Face. Model weights are downloaded only when requested.
+Python 3.12 and dependencies are pinned. The hash-checked data and recordings
+total about 28 MB; native training downloads the pinned model separately.
+Both input directories contain only development data. Use new output directories
+for repeated training runs. All code lives in this example; large artifacts live
+on Hugging Face.
 
-## 1. Measure the starting decision model
+## 1. Measure calibrated Laya [53.65%]
 
-Laya is a roughly 421M-parameter ModernBERT-based decision model. It scores a
-typed question with two options, without generating an answer. Inspect
-`evidence/questions.json` to see the question and route definitions, then replay
-the published baselines:
+**Apple or CUDA GPU.** Laya is a roughly 421M-parameter ModernBERT-based decision model. It
+scores the two options in `evidence/questions.json`. The `base` variant leaves
+its weights unchanged and fits a cutoff using calibration examples, then the
+evaluation command runs fresh inference on the test set:
 
 ```sh
-uv run --frozen python run.py replay \
-  --policies run-output/baseline-policies --output run-output/baseline-report.json
+uv run --frozen --group training python finetune.py train \
+  --data run-output/lora-small-inputs --output run-output/my-base \
+  --variants base --seed 89 --device "$ROUTER_DEVICE"
+uv run --frozen --group training python finetune.py evaluate \
+  --evaluation evidence/test.json --questions evidence/questions.json \
+  --output run-output/my-base --device "$ROUTER_DEVICE"
 ```
 
-Look for `base-89`: **53.65%** accuracy. This is the pretrained model with a
-cutoff fitted on separate calibration examples; its weights are unchanged.
-The other base rows repeat that same checkpoint. The replay also rebuilds the
-embedding baselines used later, using cached vectors, and verifies the original
-native results from recorded scores. It runs no encoder or Laya inference.
+Read `run-output/my-base/evaluation-test.json`. This measures the starting
+decision model with a calibrated cutoff; it performs no weight updates.
 
-## 2. Adapt Laya with LoRA
+## 2. Adapt Laya on 512 examples [57.34%]
 
-Train attention adapters **and the native decision head** on 512 examples.
-Choose the checkpoint on validation AUC, then fit its cutoff on the separate
-calibration split. Replay the recorded training comparison:
+**Apple or CUDA GPU.** Train rank-16 attention adapters **and the native decision head** for
+eight epochs. Validation AUC selects the checkpoint; separate calibration sets
+its cutoff after FP32 export. Evaluate only after training writes `frozen.json`.
 
 ```sh
-uv run --frozen python lora_report.py \
-  --study run-output/lora-study --evidence evidence \
-  --output run-output/lora-report.json
+uv run --frozen --group training python finetune.py train \
+  --data run-output/lora-small-inputs --output run-output/my-lora512 \
+  --variants lora --recipe original --seed 89 \
+  --validation-metric auc --export-dtype float32 --device "$ROUTER_DEVICE"
+uv run --frozen --group training python finetune.py evaluate \
+  --evaluation evidence/test.json --questions evidence/questions.json \
+  --output run-output/my-lora512 --device "$ROUTER_DEVICE"
 ```
 
-The report checks the frozen selections and recomputes metrics from recorded
-scores for every seed.
-`stages.selected_auc_512` averages **57.34%**. Follow
-[train on 512 examples](docs/lora-study.md#train-on-512-examples) to run this
-stage yourself on CUDA. The guide includes the locked dependencies and exact
-settings; replaying its records requires only CPU.
+The recorded seed-89 run scored **57.41%**; the heading gives the three-seed
+mean. Your merged model is in `run-output/my-lora512/lora/` and its measured
+results are in `evaluation-test.json` beside it.
 
-## 3. Improve the decision model with more examples
+## 3. Expand LoRA training to 2,581 examples [65.00%]
 
-Keep that recipe and expand its training set from 512 to 2,581 examples. In the
-same report, compare `selected_auc_512` with `selected_auc_2581`: mean accuracy
-rises to **65.00%**, with **17.9% fewer errors**. Every declared seed improves.
-The eight-epoch schedule also means more optimizer updates at the larger size.
-
-Plot the recorded improvement alongside every training seed:
+**Apple or CUDA GPU.** Keep the recipe and change the training data. The first 512 rows are
+unchanged, as are validation, calibration and test. Keep these settings fixed
+through the walkthrough rather than adjusting them after inspecting test errors.
 
 ```sh
-uv run --frozen --group plots python plot.py \
-  --lora-study run-output/lora-study --evidence evidence \
-  --output run-output/lora-figures
+uv run --frozen --group training python finetune.py train \
+  --data run-output/lora-expanded-inputs --output run-output/my-lora2581 \
+  --variants lora --recipe original --seed 89 \
+  --validation-metric auc --export-dtype float32 --device "$ROUTER_DEVICE"
+uv run --frozen --group training python finetune.py evaluate \
+  --evaluation evidence/test.json --questions evidence/questions.json \
+  --output run-output/my-lora2581 --device "$ROUTER_DEVICE"
 ```
 
-Open `run-output/lora-figures/lora-study.png` to compare the stages.
-Follow [train on 2,581 examples](docs/lora-study.md#train-on-2581-examples) using
-the downloaded expanded dataset. Validation, calibration and test stay fixed.
-The guide also shows how to [serve the trained router locally](docs/lora-study.md#serve-the-downloaded-router-locally)
-using its published checkpoint, without training it first.
+Recorded seed 89 scored **66.60%**. Across all three seeds, mean accuracy rose
+from 57.34% to 65.00%: **17.9% fewer errors**, with a paired 95% gain interval of
+**+3.20 to +12.04 percentage points**. Eight epochs on more data also means more
+optimizer updates. The [native training guide](docs/lora-study.md) explains the
+full study, export checks and CPU replay of the recorded comparison.
 
-## 4. Train a classifier on frozen embeddings
+## 4. Train an embedding classifier on 64 examples [67.64%]
 
-Now change the design: keep **Qwen3-Embedding-4B** frozen and learn a ridge
-classifier over its vectors. The classifier has 2,560 weights and a bias, with
-no hidden layers. Fit it locally from the cached embeddings:
+**CPU.** Change the design: keep **Qwen3-Embedding-4B** frozen and learn a ridge
+classifier over its 2,560-dimensional vectors. The classifier has one weight per
+dimension and a bias, with no hidden layers. Train using cached embeddings:
 
 ```sh
 uv run --frozen python run.py train
 ```
 
-This trains and freezes the complete declared suite at 64, 128, 256 and 512
-examples, including nearest-neighbor controls. Inspect
-`run-output/policies/ridge64.json`: it contains the coefficients and calibrated
-cutoff. With 64 training examples, this design reaches **67.64%** accuracy.
-Its encoder is larger than Laya; the small classifier alone is not the whole
-inference cost.
+The existing command fits the complete suite once: ridge and nearest-neighbor
+controls at 64, 128, 256 and 512 training examples. Inspect
+`run-output/policies/ridge64.json` for the 64-example coefficients and calibrated
+cutoff. The next step evaluates this policy alongside the 512-example version.
 
-## 5. Improve the embedding classifier with more examples
+## 5. Compare the 512-example embedding classifier [72.03%]
 
-Evaluate the frozen suite, including the version trained on 512 examples:
+**CPU.** Evaluate the policies frozen in step 4:
 
 ```sh
 uv run --frozen python run.py evaluate
 ```
 
-Compare `ridge64` (**67.64%**) with `ridge512` (**72.03%**). Only the local
-classifier changes; the encoder stays frozen. At serving time both use one
-embedding call and the same number of classifier coefficients. Adding training
-examples does not add inference calls. The 4.38-point gain is a point estimate;
-its 95% interval includes zero. All intermediate budgets are in [results](docs/results.md).
+Compare `ridge64` (**67.64%**) with `ridge512` (**72.03%**). The encoder stays
+fixed; only the learned classifier changes. Both use one embedding call and
+the same number of coefficients when serving. The 4.38-point gain has a 95%
+interval that includes zero; all budgets are retained in [results](docs/results.md).
+The 512-example ridge policy is the strongest measured design here. Its larger
+encoder remains part of the computation required for each fresh request.
 
-To repeat learning with fresh Cloud or local embeddings, follow
-[collect embeddings and retrain](docs/serving.md#collect-embeddings-and-retrain).
-It keeps development and test collection separate and saves usage receipts.
-Cached replay and CPU classifier training spend no credits. Training requires
-new policy directories; use new output paths when repeating runs.
+## Serve your router
 
-## 6. Route fresh requests through SIE
-
-Create an account and API key in [SIE Console](https://console.superlinked.com).
-Use the free credits shown in your account, if available. Set the key in your
-shell, then use the 512-example classifier:
+For Cloud embeddings, create an account and key in
+[SIE Console](https://console.superlinked.com). Use the free credits shown in
+your account, if available:
 
 ```sh
 export SIE_API_KEY=your-key
@@ -157,14 +188,30 @@ uv run --frozen python run.py route \
   --request 'A rectangle has perimeter 30 and length 9. What is its area?'
 ```
 
-The script makes one embedding call, applies your local classifier, and prints
-the route and available usage receipt. For the same flow on your own computer,
-follow [local SIE serving](docs/serving.md). Custom LoRA checkpoints also run on
-your own SIE server; a Cloud inference key does not provision training.
+This makes one embedding call and applies your locally trained classifier.
+To serve **your trained LoRA model** through your own SIE server:
 
-You now have two update paths: retrain Laya adapters or retrain a small classifier
-on frozen embeddings. Both require reviewed examples, development selection and
-a frozen evaluation. This task measures difficulty classification; downstream
-answer quality and monetary savings need their own measurements. See
-[methodology](docs/methodology.md) for the data and leakage checks, and
-[earlier assets](docs/archive.md) for the separate original routing examples.
+```sh
+uv run --frozen python decision.py configure \
+  --run run-output/my-lora2581 --variant lora \
+  --models-dir run-output/my-router-models
+SIE_IPC_SOCKET_PATH=/tmp/sie-example-my-router.sock \
+uvx --from 'sie-server[local]==0.10.0' sie-server serve \
+  --host 127.0.0.1 --port 8100 --models-dir run-output/my-router-models \
+  --models example/laya-difficulty-lora --preload example/laya-difficulty-lora
+```
+
+After the model loads, open another terminal in this example directory:
+
+```sh
+export SIE_BASE_URL=http://127.0.0.1:8100
+unset SIE_API_KEY
+uv run --frozen python decision.py route \
+  --run run-output/my-lora2581 --variant lora --contest AMC10 \
+  --request 'A rectangle has perimeter 30 and length 9. What is its area?'
+```
+
+Stop the server with Ctrl-C. [Serving instructions](docs/serving.md) also cover
+running Qwen locally, checking serving consistency, and collecting fresh
+embeddings for retraining. This example measures difficulty classification;
+downstream answer quality and money savings require their own measurements.

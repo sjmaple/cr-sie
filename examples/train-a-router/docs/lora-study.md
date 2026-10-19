@@ -13,11 +13,201 @@ regression benchmark. The next stage of the walkthrough changes to Qwen4B plus
 a ridge classifier, reaching **72.03%** with 512 training examples. See
 [results](results.md) for every seed and the limits of these comparisons.
 
-Run commands from `examples/train-a-router`. You can replay the native results
-on CPU, train both sizes on CUDA, or serve a downloaded checkpoint locally.
-Replay verifies recorded predictions; it does not retrain Laya. A Cloud inference
-key covers embedding calls, not a CUDA training job. Training and figure output
-directories must be new; `lora_report.py` replaces its output JSON file.
+Run commands from `examples/train-a-router`. This guide trains both sizes,
+evaluates their frozen checkpoints, and serves a trained router. Training uses
+your GPU; SIE Cloud credits cover embedding inference. Use new output directories
+for each training run. If you completed the main walkthrough, reuse its inputs
+and outputs and skip the preparation and training commands you already ran.
+
+## Choose the training device
+
+Use a CUDA GPU locally or on a VM. Apple Silicon uses the Apple GPU through
+PyTorch MPS. The reference accuracy values were measured on CUDA; a fresh run
+on another device can produce different scores and checkpoint selections.
+
+For an NVIDIA GPU:
+
+```sh
+export ROUTER_DEVICE=cuda
+```
+
+For an Apple Silicon Mac:
+
+```sh
+export ROUTER_DEVICE=mps
+```
+
+Both paths use the same model, labels, eight-epoch schedule and effective batch
+size of 16. The Mac runtime uses FP32, one example per micro-batch, accumulation
+over 16 micro-batches, and evaluation batches of four. It disables gradient
+checkpointing: a local Torch 2.9.1 check found that recomputing checkpointed
+MPS dropout changed gradients despite identical forward outputs. Smaller batches
+allow ordinary backpropagation without that optimization. The runtime settings
+are saved in each training plan. See [Mac validation](mac-training.md) for the
+measured hardware, runtime and memory requirements.
+
+## Prepare development inputs
+
+Download the pinned data and make a directory for each training size. Both
+contain only the four development inputs. On a remote training machine, transfer
+these directories and keep test inputs for later evaluation.
+
+```sh
+uv sync --frozen --group training
+uv run --frozen --group training python run.py fetch
+uv run --frozen --group training python run.py fetch --lora-study
+mkdir run-output/lora-small-inputs run-output/lora-expanded-inputs
+cp evidence/train.jsonl evidence/validation.jsonl evidence/calibration.jsonl \
+  evidence/questions.json run-output/lora-small-inputs/
+cp evidence/validation.jsonl evidence/calibration.jsonl evidence/questions.json \
+  run-output/lora-expanded-inputs/
+cp run-output/lora-study/expansion/train-expanded.jsonl \
+  run-output/lora-expanded-inputs/train.jsonl
+```
+
+Training requires the selected GPU and several GB of output space per run.
+The locked environment uses Laya 0.3.29, Torch 2.9.1, Transformers 4.57.6 and
+PEFT 0.18.1. The recorded runs used an H100; fresh results can vary with hardware.
+
+## Train on 512 examples [57.34% reference accuracy]
+
+First complete [prepare development inputs](#prepare-development-inputs), which
+creates the input directories and installs the training dependencies.
+Run the adaptation stage with the declared `original` recipe:
+
+```sh
+uv run --frozen --group training python finetune.py train \
+  --data run-output/lora-small-inputs --output run-output/my-lora512 \
+  --seed 89 --recipe original --variants lora \
+  --validation-metric auc --export-dtype float32 --device "$ROUTER_DEVICE"
+```
+
+This trains attention adapters and the native decision head for eight epochs,
+keeps the checkpoint with the best validation AUC, and fits a cutoff on separate
+calibration examples. It writes the merged checkpoint to
+`run-output/my-lora512/lora/` and freezes its selection and cutoff in
+`frozen.json`. The published three-seed mean is **57.34%**; seed 89 alone scored
+**57.41%**. A single training run does not reproduce a three-seed average.
+
+## Train on 2,581 examples [65.00% reference accuracy]
+
+First complete [prepare development inputs](#prepare-development-inputs) if you
+arrived here directly from the main walkthrough.
+Keep the recipe, selection and calibration rules, and change the training data:
+
+```sh
+uv run --frozen --group training python finetune.py train \
+  --data run-output/lora-expanded-inputs --output run-output/my-lora2581 \
+  --seed 89 --recipe original --variants lora \
+  --validation-metric auc --export-dtype float32 --device "$ROUTER_DEVICE"
+```
+
+The first 512 rows are exactly the smaller training set. Validation, calibration
+and test remain unchanged. The published three-seed mean is **65.00%**; seed 89
+alone scored **66.60%**. At eight epochs, growing the data also grows the number
+of optimizer updates from 256 to 1,296. This is the practical recipe of adding
+examples and training for the same number of passes, not a fixed-compute study.
+
+After both runs have written `frozen.json`, evaluate the fixed models:
+
+```sh
+uv run --frozen --group training python finetune.py evaluate \
+  --evaluation evidence/test.json --questions evidence/questions.json \
+  --output run-output/my-lora512 --device "$ROUTER_DEVICE"
+uv run --frozen --group training python finetune.py evaluate \
+  --evaluation evidence/test.json --questions evidence/questions.json \
+  --output run-output/my-lora2581 --device "$ROUTER_DEVICE"
+```
+
+The serving commands below use `run-output/my-lora2581`. Choose a new
+`--models-dir` in both the configuration and server commands when switching
+checkpoints. Seed 89 is the fixed demonstration seed; the complete study
+uses seeds 89, 137 and 211 and reports all of them. For a new application, reserve
+new evaluation data before training and define labels for the outcome you need.
+The published benchmark supports reproduction, not repeated tuning against its
+answers.
+
+On a fresh CUDA machine, training and direct evaluation can start slowly:
+Transformers may compile ModernBERT blocks, and evaluation also runs timing
+calls before printing results. The complete study's guarded evaluator below
+checks development-score parity before evaluating test cases.
+
+## Serve your trained router
+
+Configure SIE with the expanded checkpoint you trained and evaluated above:
+
+```sh
+uv run --frozen python decision.py configure \
+  --run run-output/my-lora2581 --variant lora \
+  --models-dir run-output/my-lora-models
+SIE_IPC_SOCKET_PATH=/tmp/sie-example-lora.sock \
+uvx --from 'sie-server[local]==0.10.0' sie-server serve \
+  --host 127.0.0.1 --port 8100 --models-dir run-output/my-lora-models \
+  --models example/laya-difficulty-lora --preload example/laya-difficulty-lora
+```
+
+Wait for the model to load. In another terminal, from the same example folder:
+
+```sh
+export SIE_BASE_URL=http://127.0.0.1:8100
+unset SIE_API_KEY
+uv run --frozen python decision.py route \
+  --run run-output/my-lora2581 --variant lora --contest AMC10 \
+  --request 'A rectangle has perimeter 30 and length 9. What is its area?'
+uv run --frozen python check_serving.py \
+  --run run-output/my-lora2581 --variant lora \
+  --evaluation evidence/test.json --limit 32 \
+  --output run-output/my-lora-serving.json
+```
+
+The check compares 32 decisions from this checkpoint with its own frozen
+`evaluation-test.json`. It checks serving consistency, not new accuracy. Stop
+the server with Ctrl-C. Custom checkpoints run on your own SIE server; the
+[Cloud exercise](../README.md#serve-your-router) uses the public Qwen embedding
+model and your learned classifier.
+
+To try serving without training first, fetch the published seed-89 checkpoint
+(about **1.7 GB**):
+
+```sh
+uv run --frozen python run.py fetch --lora-study --weights lora
+```
+
+Then use `--run run-output/lora-study/expanded/seed-89` in the commands above
+and choose a new `--models-dir`. Seed 89 was fixed before test evaluation.
+`fetch --lora-study --weights lora` fetches this expanded FP32 model; omitting
+`--lora-study` selects the separate original 512-example checkpoint.
+
+## Rebuild the dataset from its source
+
+The training steps above use the downloaded, hash-checked data. To audit its
+construction, rebuild from the pinned public Parquet source:
+
+```sh
+uv run --frozen --group data python data.py \
+  --source run-output/lora-source \
+  --output run-output/lora-rebuilt \
+  --previously-used evidence/prior-used-ids.json
+uv run --frozen --group data python expand_training.py \
+  --source run-output/lora-source --evidence evidence \
+  --output run-output/lora-expansion
+```
+
+The expansion uses all 2,581 eligible pre-2018 duplicate-family representatives.
+Its first 512 rows must exactly match the original training file. It preserves
+the original human-rating thresholds and removes families that cross temporal
+partitions. Validation, calibration, and test populations stay unchanged.
+`training-expansion-audit.json` records the source hashes, row identities,
+family identities, and generated-file hash.
+
+Compare the regenerated files with the downloaded expansion:
+
+```sh
+cmp run-output/lora-expansion/train-expanded.jsonl \
+  run-output/lora-study/expansion/train-expanded.jsonl
+cmp run-output/lora-expansion/training-expansion-audit.json \
+  run-output/lora-study/expansion/training-expansion-audit.json
+```
 
 ## Replay the recorded comparison
 
@@ -63,168 +253,6 @@ reference. The figure recomputes the strict report rather than reading a saved
 `plot.py` without `--lora-study` continues to generate the original baseline
 figures.
 
-## Prepare development inputs
-
-After the two downloads above, make a directory for each training size. Both
-contain only the four development inputs. On a remote training machine, transfer
-these directories and keep test inputs for later evaluation.
-
-```sh
-mkdir run-output/lora-small-inputs run-output/lora-expanded-inputs
-cp evidence/train.jsonl evidence/validation.jsonl evidence/calibration.jsonl \
-  evidence/questions.json run-output/lora-small-inputs/
-cp evidence/validation.jsonl evidence/calibration.jsonl evidence/questions.json \
-  run-output/lora-expanded-inputs/
-cp run-output/lora-study/expansion/train-expanded.jsonl \
-  run-output/lora-expanded-inputs/train.jsonl
-uv sync --frozen --group training
-```
-
-Training requires a compatible CUDA GPU and several GB of output space per run.
-The locked environment uses Laya 0.3.29, Torch 2.9.1, Transformers 4.57.6 and
-PEFT 0.18.1. The recorded runs used an H100; fresh results can vary with hardware.
-
-## Train on 512 examples
-
-First complete [prepare development inputs](#prepare-development-inputs), which
-creates the input directories and installs the training dependencies.
-Run the adaptation stage with the declared `original` recipe:
-
-```sh
-uv run --frozen --group training python finetune.py train \
-  --data run-output/lora-small-inputs --output run-output/my-lora512 \
-  --seed 89 --recipe original --variants lora \
-  --validation-metric auc --export-dtype float32 --device cuda
-```
-
-This trains attention adapters and the native decision head for eight epochs,
-keeps the checkpoint with the best validation AUC, and fits a cutoff on separate
-calibration examples. It writes the merged checkpoint to
-`run-output/my-lora512/lora/` and freezes its selection and cutoff in
-`frozen.json`. The published three-seed mean is **57.34%**; seed 89 alone scored
-**57.41%**. A single training run does not reproduce a three-seed average.
-
-## Train on 2,581 examples
-
-First complete [prepare development inputs](#prepare-development-inputs) if you
-arrived here directly from the main walkthrough.
-Keep the recipe, selection and calibration rules, and change the training data:
-
-```sh
-uv run --frozen --group training python finetune.py train \
-  --data run-output/lora-expanded-inputs --output run-output/my-lora2581 \
-  --seed 89 --recipe original --variants lora \
-  --validation-metric auc --export-dtype float32 --device cuda
-```
-
-The first 512 rows are exactly the smaller training set. Validation, calibration
-and test remain unchanged. The published three-seed mean is **65.00%**; seed 89
-alone scored **66.60%**. At eight epochs, growing the data also grows the number
-of optimizer updates from 256 to 1,296. This is the practical recipe of adding
-examples and training for the same number of passes, not a fixed-compute study.
-
-After both runs have written `frozen.json`, evaluate the fixed models:
-
-```sh
-uv run --frozen --group training python finetune.py evaluate \
-  --evaluation evidence/test.json --questions evidence/questions.json \
-  --output run-output/my-lora512 --device cuda
-uv run --frozen --group training python finetune.py evaluate \
-  --evaluation evidence/test.json --questions evidence/questions.json \
-  --output run-output/my-lora2581 --device cuda
-```
-
-For local serving, substitute `--run run-output/my-lora2581 --variant lora` in
-the commands below. Choose a new `--models-dir` in both the configuration and
-server commands when switching checkpoints. Seed 89 is the fixed demonstration seed; the complete study
-uses seeds 89, 137 and 211 and reports all of them. For a new application, reserve
-new evaluation data before training and define labels for the outcome you need.
-The published benchmark supports reproduction, not repeated tuning against its
-answers.
-
-On a fresh CUDA machine, training and direct evaluation can start slowly:
-Transformers may compile ModernBERT blocks, and evaluation also runs timing
-calls before printing results. The complete study's guarded evaluator below
-checks development-score parity before evaluating test cases.
-
-## Serve the downloaded router locally
-
-Download the published expanded seed-89 native checkpoint (about **1.7 GB**):
-
-```sh
-uv run --frozen python run.py fetch --lora-study --weights lora
-```
-
-This downloads the merged FP32 checkpoint under
-`run-output/lora-study/expanded/seed-89/lora/`. Seed 89 is a fixed serving example,
-not a seed chosen by test performance. The LoRA-study fetch accepts only
-`--weights lora`; the original `fetch --weights full`, `lora`, and `both` continue
-to refer to the original experiment.
-
-Configure and start SIE:
-
-```sh
-uv run --frozen python decision.py configure \
-  --run run-output/lora-study/expanded/seed-89 --variant lora \
-  --models-dir run-output/lora-study-models
-SIE_IPC_SOCKET_PATH=/tmp/sie-example-lora-study.sock \
-uvx --from 'sie-server[local]==0.10.0' sie-server serve \
-  --host 127.0.0.1 --port 8100 --models-dir run-output/lora-study-models \
-  --models example/laya-difficulty-lora --preload example/laya-difficulty-lora
-```
-
-Wait for the model to load. In another terminal, from the same example folder:
-
-```sh
-export SIE_BASE_URL=http://127.0.0.1:8100
-unset SIE_API_KEY
-uv run --frozen python decision.py route \
-  --run run-output/lora-study/expanded/seed-89 --variant lora --contest AMC10 \
-  --request 'A rectangle has perimeter 30 and length 9. What is its area?'
-uv run --frozen python check_serving.py \
-  --run run-output/lora-study/expanded/seed-89 --variant lora \
-  --evaluation evidence/test.json --limit 32 \
-  --output run-output/lora-study-serving.json
-```
-
-The check compares 32 decisions from this checkpoint with its recorded GPU
-evaluation and reports any mismatch. It is a serving consistency check, not a
-new accuracy measurement. The historical example's serving receipts apply to
-its own checkpoints. Stop the server with Ctrl-C. Custom native checkpoints run
-on your own SIE server; the [Cloud exercise](../README.md#6-route-fresh-requests-through-sie)
-uses the public Qwen embedding model.
-
-## Rebuild the dataset from its source
-
-The training steps above use the downloaded, hash-checked data. To audit its
-construction, rebuild from the pinned public Parquet source:
-
-```sh
-uv run --frozen --group data python data.py \
-  --source run-output/lora-source \
-  --output run-output/lora-rebuilt \
-  --previously-used evidence/prior-used-ids.json
-uv run --frozen --group data python expand_training.py \
-  --source run-output/lora-source --evidence evidence \
-  --output run-output/lora-expansion
-```
-
-The expansion uses all 2,581 eligible pre-2018 duplicate-family representatives.
-Its first 512 rows must exactly match the original training file. It preserves
-the original human-rating thresholds and removes families that cross temporal
-partitions. Validation, calibration, and test populations stay unchanged.
-`training-expansion-audit.json` records the source hashes, row identities,
-family identities, and generated-file hash.
-
-Compare the regenerated files with the downloaded expansion:
-
-```sh
-cmp run-output/lora-expansion/train-expanded.jsonl \
-  run-output/lora-study/expansion/train-expanded.jsonl
-cmp run-output/lora-expansion/training-expansion-audit.json \
-  run-output/lora-study/expansion/training-expansion-audit.json
-```
-
 ## Reproduce the complete recipe comparison
 
 The main training path uses the recipe already selected on development data.
@@ -235,7 +263,7 @@ uv sync --frozen --group training
 uv run --frozen --group training python lora_study.py \
   --data run-output/lora-small-inputs \
   --expanded-data run-output/lora-expanded-inputs \
-  --output run-output/my-lora-study --device cuda \
+  --output run-output/my-lora-study --device "$ROUTER_DEVICE" \
   --timeout-seconds 14400
 ```
 
@@ -317,7 +345,7 @@ Then make the original evidence available on the evaluation machine and run:
 ```sh
 uv run --frozen --group training python lora_evaluate.py \
   --study run-output/my-lora-study --evidence evidence \
-  --device cuda --timeout-seconds 1800
+  --device "$ROUTER_DEVICE" --timeout-seconds 1800
 uv run --frozen python lora_report.py \
   --study run-output/my-lora-study --evidence evidence \
   --output run-output/my-lora-report.json

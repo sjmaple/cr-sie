@@ -34,7 +34,7 @@ from replay of the pinned recordings. For bulk local collection, add
 
 ## Collect embeddings and retrain
 
-Set your Cloud key as in [step 6](../README.md#6-route-fresh-requests-through-sie),
+Set your Cloud key as in [serve your router](../README.md#serve-your-router),
 or start a local server and set its endpoint as above. Collect development
 vectors and fit the classifier before collecting the test vectors:
 
@@ -63,10 +63,10 @@ pass `--policy run-output/fresh-policies/ridge512.json` to `run.py route`.
 ## Serve the adapted decision model
 
 For the main walkthrough's 2,581-example LoRA model, follow
-[serve the downloaded router](lora-study.md#serve-the-downloaded-router-locally).
-Those commands fetch its FP32 seed-89 checkpoint, configure SIE, route a request,
-and check 32 decisions against its recorded evaluation. You can also substitute
-your own frozen training output.
+[serve your trained router](lora-study.md#serve-your-trained-router).
+Those commands configure SIE with `run-output/my-lora2581`, route a request,
+and check 32 decisions against your own frozen evaluation. The guide also
+provides a published checkpoint for trying serving without training first.
 
 ### Serve the historical 512-example checkpoints
 

@@ -134,11 +134,8 @@ used. Calibration is separate and uses the saved checkpoint after serialization.
 All three per-seed paired LoRA-minus-full case intervals include zero; seed
 variation and the small test population do not establish a universal ranking.
 
-These numbers replace the earlier near-90% global-difficulty results, which had
-duplicate-family overlap and a label strongly confounded with contest family.
-The target and partitions changed, so the old and new accuracies are not an
-apples-to-apples before/after comparison. The [archive](archive.md) preserves the
-old evidence; [methodology](methodology.md) gives the corrected protocol.
+The [methodology](methodology.md) describes the competition-relative labels,
+chronological partitions and duplicate-family checks used for these results.
 
 ## Reproduce and use
 

@@ -1,4 +1,4 @@
-"""Optional GPU lab: full fine-tuning and encoder LoRA for native Laya decisions.
+"""Train native Laya decisions on a CUDA or Apple Silicon GPU.
 
 Training reads train.jsonl, validation.jsonl and calibration.jsonl. Evaluation is a separate
 command, after checkpoint/threshold selection has been written and hashed.
@@ -118,8 +118,32 @@ def items(lt, tok, path, smoothing=0.0):
     return result
 
 
+def runtime_settings(device_type):
+    if device_type == "mps":
+        # Torch 2.9.1 checkpoint recomputation does not restore MPS dropout RNG.
+        # Small batches keep memory bounded without that optimization.
+        return {"micro_batch": 1, "grad_accum": 16, "gradient_checkpointing": False, "evaluation_batch": 4}
+    return {"micro_batch": 8, "grad_accum": 2, "gradient_checkpointing": True, "evaluation_batch": 16}
+
+
+def empty_cache(torch, device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
+def synchronize(torch, device):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
 def scores(lt, model, tok, data, device):
-    records = lt.calibration_records(model, tok, data, device, MAX_LEN, HEAD_LEN, batch_size=16)
+    records = lt.calibration_records(
+        model, tok, data, device, MAX_LEN, HEAD_LEN, batch_size=runtime_settings(device.type)["evaluation_batch"]
+    )
     logits = np.array([r[1] for r in records], dtype=np.float64)
     labels = np.array([int(np.argmax(r[2])) for r in records])
     if logits.shape != (len(data), 2) or not np.isfinite(logits).all():
@@ -169,13 +193,14 @@ def train(args):
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
     device = torch.device(args.device)
+    runtime = runtime_settings(device.type)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
     config = lt.TrainConfig(
         epochs=8,
-        micro_batch=8,
-        grad_accum=2,
+        micro_batch=runtime["micro_batch"],
+        grad_accum=runtime["grad_accum"],
         encoder_lr=2.5e-5,
         head_lr=1e-4,
         seed=args.seed,
@@ -183,7 +208,7 @@ def train(args):
         head_max_len=HEAD_LEN,
         loss="soft-ce",
         shuffle_options=("choice",),
-        gradient_checkpointing=True,
+        gradient_checkpointing=runtime["gradient_checkpointing"],
         log_every=32,
     )
     recipe = LORA_RECIPES[args.recipe]
@@ -191,6 +216,7 @@ def train(args):
         "base": BASE,
         "revision": REVISION,
         "config": asdict(config),
+        "runtime": runtime,
         "variants": args.variants,
         "selection": (
             "Maximum validation ROC AUC, including epoch zero; ties retain earlier epoch. "
@@ -337,7 +363,7 @@ def train(args):
                     str(destination / "model.safetensors"),
                 )
             del model
-            torch.cuda.empty_cache()
+            empty_cache(torch, device)
             model, tok, _ = lt.load_checkpoint(str(destination))
             model.to(device).eval()
             exported, _ = scores(lt, model, tok, validation, device)
@@ -374,7 +400,7 @@ def train(args):
         write(output / "selection.json", summary)
         select = None
         del model
-        torch.cuda.empty_cache()
+        empty_cache(torch, device)
     write(output / "frozen.json", {"plan_sha256": sha(output / "plan.json"), "selected": summary})
     print("FROZEN", json.dumps(summary), flush=True)
 
@@ -421,12 +447,10 @@ def evaluate(args):
         # Same warm model, text, device and batch size across all three variants.
         latencies = []
         for index in range(min(35, len(encoded))):
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+            synchronize(torch, device)
             start = time.perf_counter()
             scores(lt, model, tok, encoded[index : index + 1], device)
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+            synchronize(torch, device)
             if index >= 5:
                 latencies.append(time.perf_counter() - start)
         measured["batch1_seconds"] = {
@@ -438,7 +462,7 @@ def evaluate(args):
         write(args.output / f"evaluation-{args.evaluation.stem}.json", result)
         print(name, measured["accuracy"], measured["errors"], measured["batch1_seconds"], flush=True)
         del model
-        torch.cuda.empty_cache()
+        empty_cache(torch, device)
 
 
 def main():
