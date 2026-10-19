@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 
 from data import audit, duplicate_components
+from finetune import auc, better
 from finetune import cutoff as native_cutoff
 from policies import cutoff, ridge
 
@@ -56,6 +57,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(native_cutoff(values, labels), 0.25)
         with self.assertRaises(ValueError):
             cutoff(values, np.zeros(4))
+
+    def test_ranking_selection_ignores_confidence_scale_and_keeps_early_ties(self):
+        labels = [0, 0, 1, 1]
+        scores = np.array([0.0, 0.5, 0.5, 1.0])
+        self.assertAlmostEqual(auc(scores, labels), 0.875)
+        self.assertEqual(auc(scores, labels), auc(scores * 100 + 5, labels))
+        best = {"auc": 0.875, "cross_entropy": 0.5}
+        self.assertFalse(better({"auc": 0.875, "cross_entropy": 0.4}, best, "auc"))
+        candidate = {"auc": 0.9, "cross_entropy": 0.6}
+        self.assertTrue(better(candidate, best, "auc"))
+        self.assertFalse(better(candidate, best, "cross-entropy"))
+        with self.assertRaises(ValueError):
+            auc(scores, [0, 0, 0, 0])
 
 
 if __name__ == "__main__":

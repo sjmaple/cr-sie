@@ -20,9 +20,14 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("fetch", "replay", "train", "evaluate", "collect", "route"):
         child = sub.add_parser(command)
-        child.add_argument("--evidence", type=Path, default=Path("evidence"))
+        child.add_argument("--evidence", type=Path, default=None if command == "fetch" else Path("evidence"))
         if command == "fetch":
             child.add_argument("--weights", choices=("full", "lora", "both"))
+            child.add_argument(
+                "--lora-study",
+                action="store_true",
+                help="Fetch the separate LoRA follow-up; defaults to --evidence run-output/lora-study",
+            )
         elif command == "collect":
             child.add_argument("--split", choices=("development", "test"), required=True)
             child.add_argument("--output", type=Path, required=True)
@@ -42,7 +47,10 @@ def main():
                 child.add_argument("--embeddings", type=Path)
     args = parser.parse_args()
     if args.command == "fetch":
-        evidence.fetch(args.evidence, args.weights)
+        if args.lora_study and args.weights not in (None, "lora"):
+            parser.error("--lora-study supports only --weights lora")
+        directory = args.evidence or Path("run-output/lora-study" if args.lora_study else "evidence")
+        evidence.fetch(directory, args.weights, lora_study=args.lora_study)
         return
     if args.command == "route":
         policy = json.loads(args.policy.read_text())

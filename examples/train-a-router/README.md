@@ -7,14 +7,16 @@ difficulty; it does not choose which LLM can answer correctly.
 
 The progression is **64-example nearest neighbors → learned linear classifier
 → 512 reviewed examples → optional fine-tuned decision model**. The encoder is
-Qwen3-Embedding-4B. The GPU extension compares full fine-tuning and LoRA on Laya.
+Qwen3-Embedding-4B. The GPU extension trains a smaller Laya decision model.
 See [results](docs/results.md), [the evaluation protocol](docs/methodology.md),
 and [how this differs from the earlier studies](docs/archive.md).
 
 On the corrected held-out set, the main progression improves accuracy from
-**59.29% to 72.03%**: **31.3% fewer routing errors**. The native fine-tuning
-recipes reach 57.48% (full) and 55.74% (LoRA) on average across three seeds;
-they are optional comparisons, not the recommended policy for this dataset.
+**59.29% to 72.03%**: **31.3% fewer routing errors**. Qwen plus ridge remains the
+recommended policy. In the [LoRA follow-up](docs/lora-study.md), expanding the
+same recipe from 512 to 2,581 training examples raises mean accuracy from
+**57.34% to 65.00%** across three seeds: **17.9% fewer errors**. That follow-up
+uses the same 479 problems as an **exposed regression benchmark**.
 
 ## Run the comparison on your laptop
 
@@ -65,7 +67,9 @@ policies and pass its directory to `evaluate --embeddings`. Each collection is
 bounded, sends batches of 16, disables automatic inference retries, and saves
 usage receipts. Cached replay spends no credits.
 
-The [optional GPU lab](docs/finetuning.md) trains the decision model and serves a
-frozen checkpoint through SIE. All scripts, dependencies and configuration live
-in this folder. Large inputs and artifacts live in an immutable Hugging Face
-revision. No other example or private repository is required.
+The [LoRA guide](docs/lora-study.md) replays the improvement on CPU, serves the
+downloaded router locally, and trains one router on a CUDA GPU. It also preserves
+the full recipe comparison. The [original GPU lab](docs/finetuning.md) compares
+full fine-tuning and LoRA with 512 examples. All scripts, dependencies and
+configuration live in this folder. Large inputs and artifacts live in an immutable
+Hugging Face revision. No other example or private repository is required.

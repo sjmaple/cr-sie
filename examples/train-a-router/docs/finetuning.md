@@ -1,4 +1,16 @@
-# Optional: train the native decision model
+# Original native-model training comparison
+
+For a compact-model training walkthrough, start with the [LoRA guide](lora-study.md).
+Keeping its selected recipe fixed and expanding training from 512 to 2,581
+examples improved mean accuracy from **57.34% to 65.00%** across three seeds,
+with **17.9% fewer errors** on the exposed regression benchmark. The guide covers
+CPU replay, training one router and local SIE serving. Qwen plus ridge remains
+the recommended policy at 72.03%; see [results](results.md) for the comparison.
+
+The commands below reproduce the original 512-example, cross-entropy-selected
+comparison of full fine-tuning and LoRA. Those recipes average 57.48% and 55.74%
+accuracy respectively. The follow-up also changes export precision, so its
+512-example control is separate from this historical baseline.
 
 Use a CUDA GPU and the same downloaded dataset as the CPU exercise. The
 reference environment pins Laya 0.3.29, Torch 2.9.1, Transformers 4.57.6 and

@@ -4,4 +4,4 @@ __pycache__/
 .pytest_cache/
 evidence/
 run-output/
-training-input/
+training-input*/

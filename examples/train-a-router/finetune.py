@@ -24,6 +24,63 @@ REVISION = "aa8c91ca088ec597df95a0d1c76b3063cb2ae5e8"
 MAX_LEN = 512
 HEAD_LEN = 256
 
+LORA_RECIPES = {
+    "original": {
+        "rank": 16,
+        "encoder_lr": 2e-4,
+        "head_lr": 1e-4,
+        "dropout": 0.05,
+        "weight_decay": 0.01,
+        "smoothing": 0.0,
+        "head": "all",
+    },
+    "slow": {
+        "rank": 16,
+        "encoder_lr": 5e-5,
+        "head_lr": 1e-5,
+        "dropout": 0.05,
+        "weight_decay": 0.01,
+        "smoothing": 0.0,
+        "head": "all",
+    },
+    "regularized": {
+        "rank": 8,
+        "encoder_lr": 5e-5,
+        "head_lr": 1e-5,
+        "dropout": 0.1,
+        "weight_decay": 0.1,
+        "smoothing": 0.1,
+        "head": "all",
+    },
+    "frozen-head": {
+        "rank": 8,
+        "encoder_lr": 1e-4,
+        "head_lr": 1e-5,
+        "dropout": 0.1,
+        "weight_decay": 0.1,
+        "smoothing": 0.1,
+        "head": "none",
+    },
+    "scorer-only": {
+        "rank": 8,
+        "encoder_lr": 1e-4,
+        "head_lr": 1e-5,
+        "dropout": 0.1,
+        "weight_decay": 0.1,
+        "smoothing": 0.1,
+        "head": "scorer",
+    },
+}
+LORA_RECIPES["top-layers"] = {**LORA_RECIPES["slow"], "last_layers": 4}
+
+
+def lora_targets(recipe):
+    if recipe.get("last_layers"):
+        # The pinned ModernBERT-large encoder has 28 layers.
+        indices = "|".join(str(i) for i in range(28 - recipe["last_layers"], 28))
+        return rf".*layers\.({indices})\.attn\.(Wqkv|Wo)"
+    return r".*attn\.(Wqkv|Wo)"
+
 
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,9 +110,9 @@ def cutoff(scores, labels):
     return float(max(candidates, key=lambda t: (quality(t), -abs(t), -t)))
 
 
-def items(lt, tok, path):
+def items(lt, tok, path, smoothing=0.0):
     rows = lt.read_jsonl(str(path))
-    result, skipped = lt.items_from_rows(tok, rows, MAX_LEN, HEAD_LEN)
+    result, skipped = lt.items_from_rows(tok, rows, MAX_LEN, HEAD_LEN, label_smoothing=smoothing)
     if skipped or len(result) != len(rows):
         raise ValueError(f"Training data must not silently drop rows: {skipped}")
     return result
@@ -68,6 +125,23 @@ def scores(lt, model, tok, data, device):
     if logits.shape != (len(data), 2) or not np.isfinite(logits).all():
         raise ValueError("Expected finite two-option logits")
     return logits[:, 1] - logits[:, 0], labels
+
+
+def auc(values, labels):
+    """Pairwise ROC AUC, with half credit for equal scores."""
+    values, labels = np.asarray(values), np.asarray(labels)
+    if len(values) != len(labels) or not np.isfinite(values).all() or set(labels.tolist()) != {0, 1}:
+        raise ValueError("AUC needs finite aligned scores and both classes")
+    difference = values[labels == 1, None] - values[labels == 0][None, :]
+    return float(np.mean((difference > 0) + 0.5 * (difference == 0)))
+
+
+def better(candidate, best, metric):
+    if best is None:
+        return True
+    if metric == "auc":
+        return candidate["auc"] > best["auc"]
+    return candidate["cross_entropy"] < best["cross_entropy"]
 
 
 def metrics(values, labels, threshold):
@@ -90,6 +164,7 @@ def train(args):
     import torch
     from huggingface_hub import snapshot_download
     from peft import LoraConfig, get_peft_model
+    from safetensors.torch import save_file
 
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
@@ -111,19 +186,27 @@ def train(args):
         gradient_checkpointing=True,
         log_every=32,
     )
+    recipe = LORA_RECIPES[args.recipe]
     plan = {
         "base": BASE,
         "revision": REVISION,
         "config": asdict(config),
-        "variants": ["base", "full", "lora"],
-        "selection": "Minimum validation cross entropy; ties retain earlier epoch. Cutoff fitted once on separate calibration after selection.",
+        "variants": args.variants,
+        "selection": (
+            "Maximum validation ROC AUC, including epoch zero; ties retain earlier epoch. "
+            if args.validation_metric == "auc"
+            else "Minimum validation cross entropy; ties retain earlier epoch. "
+        )
+        + "Cutoff fitted once on separate calibration after selection.",
+        "validation_metric": args.validation_metric,
+        "recipe": args.recipe,
+        "export_dtype": args.export_dtype,
         "lora": {
-            "rank": 16,
-            "alpha": 32,
-            "dropout": 0.05,
-            "targets": r".*attn\.(Wqkv|Wo)",
-            "encoder_lr": 2e-4,
-            "head": "All native decision-head parameters train; merge encoder for native export",
+            **recipe,
+            "alpha": 2 * recipe["rank"],
+            "targets": lora_targets(recipe),
+            "frozen_head_dropout": "Retained as training-time regularization",
+            "export": "Merge encoder adapters into the unchanged native architecture",
         },
         "data_sha256": {
             n: sha(args.data / n) for n in ("train.jsonl", "validation.jsonl", "calibration.jsonl", "questions.json")
@@ -159,26 +242,33 @@ def train(args):
         model, tok, cfg = lt.load_checkpoint(str(base))
         cfg.update(max_len=MAX_LEN, head_max_len=HEAD_LEN)
         model.to(device)
-        training = items(lt, tok, args.data / "train.jsonl")
+        training = items(lt, tok, args.data / "train.jsonl", recipe["smoothing"] if variant == "lora" else 0.0)
         validation = items(lt, tok, args.data / "validation.jsonl")
         destination = base if variant == "base" else output / variant
         if variant == "lora":
             model.encoder = get_peft_model(
                 model.encoder,
                 LoraConfig(
-                    r=16,
-                    lora_alpha=32,
-                    lora_dropout=0.05,
-                    target_modules=r".*attn\.(Wqkv|Wo)",
+                    r=recipe["rank"],
+                    lora_alpha=2 * recipe["rank"],
+                    lora_dropout=recipe["dropout"],
+                    target_modules=lora_targets(recipe),
                     bias="none",
                 ),
             )
+            if args.recipe != "original":
+                for name, parameter in model.named_parameters():
+                    if not name.startswith("encoder."):
+                        parameter.requires_grad_(
+                            not name.startswith("act_head.")
+                            and (recipe["head"] == "all" or (recipe["head"] == "scorer" and name.startswith("scorer.")))
+                        )
         count = {
             "total": sum(p.numel() for p in model.parameters()),
             "trainable": sum(p.numel() for p in model.parameters() if p.requires_grad),
         }
         history = []
-        best = {"cross_entropy": float("inf")}
+        best = None
         started = time.perf_counter()
 
         def select(epoch, loss, model=model, tok=tok, validation=validation, history=history, variant=variant):
@@ -191,10 +281,11 @@ def train(args):
                 train_loss=loss,
                 threshold=threshold,
                 cross_entropy=float(np.mean(np.logaddexp(0, values) - labels * values)),
+                auc=auc(values, labels),
             )
             history.append(result)
-            if result["cross_entropy"] < best["cross_entropy"]:
-                best = result
+            if better(result, best, args.validation_metric):
+                best = dict(result)
                 if variant != "base":
                     # Keep the unmerged PEFT weights private to this training run.
                     torch.save(model.state_dict(), output / f"{variant}-best.pt")
@@ -206,6 +297,7 @@ def train(args):
                         "epoch": epoch + 1,
                         "validation_accuracy": result["accuracy"],
                         "validation_ce": result["cross_entropy"],
+                        "validation_auc": result["auc"],
                         "loss": loss,
                     }
                 ),
@@ -219,7 +311,13 @@ def train(args):
             cal_values, cal_labels = scores(lt, model, tok, calibration, device)
             best["threshold"] = cutoff(cal_values, cal_labels)
         else:
-            config.encoder_lr = 2e-4 if variant == "lora" else 2.5e-5
+            config.encoder_lr = recipe["encoder_lr"] if variant == "lora" else 2.5e-5
+            config.head_lr = recipe["head_lr"] if variant == "lora" else 1e-4
+            config.weight_decay = recipe["weight_decay"] if variant == "lora" else 0.01
+            config.label_smoothing = recipe["smoothing"] if variant == "lora" else 0.0
+            write(output / f"{variant}-train-config.json", asdict(config))
+            if args.validation_metric == "auc":
+                select(-1, None)
             lt.train_model(model, tok, training, config, device, MAX_LEN, HEAD_LEN, on_epoch_end=select)
             select = None
             model.load_state_dict(torch.load(output / f"{variant}-best.pt", weights_only=True, map_location=device))
@@ -233,6 +331,11 @@ def train(args):
                     raise ValueError(f"LoRA merge changed margins: {merge_error}")
                 write(output / "lora-merge-parity.json", {"max_margin_error": merge_error})
             lt.save_checkpoint(model, tok, cfg, str(destination))
+            if args.export_dtype == "float32":
+                save_file(
+                    {name: tensor.detach().float().cpu().contiguous() for name, tensor in model.state_dict().items()},
+                    str(destination / "model.safetensors"),
+                )
             del model
             torch.cuda.empty_cache()
             model, tok, _ = lt.load_checkpoint(str(destination))
@@ -259,6 +362,7 @@ def train(args):
             "threshold": best["threshold"],
             "threshold_source": "separate calibration split, serialized checkpoint",
             "validation_cross_entropy": best["cross_entropy"],
+            "validation_auc": best["auc"],
             "seed": args.seed,
             "epoch": best["epoch"],
             "validation_accuracy_at_zero": best["accuracy"],
@@ -343,6 +447,10 @@ def main():
     training = sub.add_parser("train")
     training.add_argument("--data", type=Path, required=True)
     training.add_argument("--seed", type=int, choices=(89, 137, 211), default=89)
+    training.add_argument("--recipe", choices=tuple(LORA_RECIPES), default="original")
+    training.add_argument("--export-dtype", choices=("float16", "float32"), default="float16")
+    training.add_argument("--validation-metric", choices=("cross-entropy", "auc"), default="cross-entropy")
+    training.add_argument("--variants", nargs="+", choices=("base", "full", "lora"), default=["base", "full", "lora"])
     testing = sub.add_parser("evaluate")
     testing.add_argument("--evaluation", type=Path, required=True)
     testing.add_argument("--questions", type=Path, required=True)
