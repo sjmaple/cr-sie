@@ -12,13 +12,17 @@ The declared secondary setting gives **33.8% / 0.83 points**: **$6.30 instead
 of $9.51 per 10,000 questions**, with about 83 fewer correct answers. Its gap
 interval is 0.33–1.30 points; results on other workloads can differ.
 
-| Step | What changes | Savings / quality gap |
+| Step | What you learn | Savings / quality gap |
 | --- | --- | --- |
-| [1. Always strong](README.md#baseline) | Send everything to 27B. | **0% / 0 points** |
-| [2. Laya](README.md#laya) | Use a fixed decision model. | **21.6% / 1.50 points** |
-| [3. LoRA](README.md#lora) | Adapt Laya on the training examples. | **16.4% / 0.80 points** |
-| [4. Embeddings](README.md#embedding-router) | Train two small classifiers on fixed Qwen embeddings. | **20.9% / 0.47 points** |
-| [5. Teacher labels](README.md#teacher-labels) | Compare teacher and reference labels on 1,539 matched examples. | **19.7% / 0.33 points** |
+| [1. Baselines](README.md#baseline) | Compare always-strong with always-cheap to see the opportunity. | **0% / 0 points** for always-strong |
+| [2. Laya](README.md#laya) | Try a compact decision model before adaptation. | **21.6% / 1.50 points** |
+| [3. LoRA](README.md#lora) | Learn from answer outcomes to preserve more quality. | **16.4% / 0.80 points** |
+| [4. Embeddings](README.md#embedding-router) | Improve measured cost and quality with small classifiers trained on CPU. | **20.9% / 0.47 points** |
+| [5. Without training answer keys](README.md#teacher-labels) | Use a teacher; compare label sources on 1,539 matched questions. | **19.7% / 0.33 points** |
+| [6. Serve your choice](README.md#serve) | Choose a cost/quality setting and route a new request. | **20.9–33.8% / 0.47–0.83 points** for embeddings |
+
+LoRA first improves quality; embeddings then improve both measured quality and
+cost. Teacher supervision is an alternative when training answer keys are missing.
 
 Solver costs are estimates at the recorded Cloud prices. Embedding savings
 include charges shared across each collection batch; Laya savings exclude
@@ -63,7 +67,9 @@ for method in embedding teacher; do
 done
 ```
 
-Create a [SIE Console](https://console.superlinked.com) account and API key to
+For stage 6, choose the primary `--target 1` (**$7.52 per 10,000 questions**, about
+47 fewer correct answers than always-strong) or the secondary `--target 2`
+(**$6.30**, about 83 fewer). Create a [SIE Console](https://console.superlinked.com) account and API key to
 use your available free credits on a new routed answer:
 
 ```sh
@@ -76,3 +82,6 @@ uv run --frozen --group outcomes python router.py answer --run run-output/my-rou
 Use a fresh output folder for each run. [Live Laya and timing commands](docs/serving.md)
 include its additional inference dependencies. The [self-hosted setup](self-host/README.md)
 uses the same SDK against your own GPU server.
+
+Finish with a saved router, your chosen cost/quality setting, and a receipt
+showing which answer model was selected and what the new request cost.

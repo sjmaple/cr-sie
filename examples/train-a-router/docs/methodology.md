@@ -193,6 +193,44 @@ use trusted benchmark answers. In a deployment without any labels, reserve a
 small independently reviewed sample for quality measurement; agreement with
 the training teacher alone cannot establish real answer quality.
 
+<a id="selection-check"></a>
+
+## Check selection separately from the fraction sent to the cheaper model
+
+A router can preserve more quality simply by using the stronger model more
+often. To check its selection, compare it with the expected result of randomly
+sending the **same fraction** of questions to the cheaper model.
+
+If that fraction is `p`, the random expectation is:
+
+- quality gap = `p × always-cheap quality gap`;
+- answer cost = `p × always-cheap cost + (1 − p) × always-strong cost`.
+
+These are algebraic expectations from the same 3,000 recorded answer pairs,
+not another model run, a sampled random policy, or new cutoff selection.
+The following descriptive check uses the primary saved setting:
+
+| Router, 2,000 training examples or cost records | Cheap-model share | Random expected gap | Router's measured gap | Random expected answer cost / 10,000 | Router's answer cost / 10,000 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Laya, unchanged | 26.2% | 1.28 points | 1.50 points | $7.61 | $7.46 |
+| Laya + LoRA | 21.7% | 1.05 points | 0.80 points | $7.94 | $7.95 |
+| Embeddings + classifiers | 34.9% | 1.70 points | 0.47 points | $6.99 | $7.46 |
+
+Unchanged Laya does not beat this random expectation on answer quality.
+LoRA shows a modest selection advantage in these point estimates; the
+embedding router shows a larger one. At the secondary setting, the embedding
+router uses 4B for **52.8%** of questions: the random expected gap is **2.57
+points**, compared with its measured **0.83 points**.
+
+Equal cheap-model shares do **not** imply equal spending. Answer length and
+cost vary by question. The embedding router's primary answer bill is about
+**$0.47 per 10,000 higher** than the random expectation: it preserves more
+quality while keeping different, more expensive questions on 27B. The table
+excludes all router charges to compare answer costs consistently; the main
+embedding result also includes its roughly $0.059 embedding charge per 10,000.
+This check explains selection behavior; it does not establish a statistically
+significant improvement or dominance at equal cost.
+
 ## Money, uncertainty, and serving costs
 
 Fresh answer generation runs on Modal. We estimate its equivalent Cloud cost
