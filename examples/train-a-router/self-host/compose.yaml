@@ -1,0 +1,87 @@
+name: sie-train-a-router
+
+x-worker: &worker
+  restart: "no"
+  shm_size: 8gb
+  volumes:
+    - ./models:/app/models:ro
+    - ./healthcheck.py:/opt/router-healthcheck.py:ro
+    - model-cache:/app/.cache/huggingface
+  environment:
+    SIE_AUTH_MODE: none
+    HF_HOME: /app/.cache/huggingface
+  healthcheck:
+    test: [CMD, python, /opt/router-healthcheck.py, cheap]
+    interval: 10s
+    timeout: 10s
+    start_period: 10m
+    retries: 3
+
+services:
+  cheap:
+    <<: *worker
+    image: ghcr.io/superlinked/sie-server:v0.10.1-cuda12-sglang@sha256:ff397c6df05721261e519986f1a0922bfe746ad180114cd93941a3ebf04bf463
+    command: [serve, --host, 0.0.0.0, --port, "8080", --models-dir, /app/models, --models, "Qwen/Qwen3.5-4B,Qwen/Qwen3.5-4B:no-spec", --preload, "Qwen/Qwen3.5-4B,Qwen/Qwen3.5-4B:no-spec", --device, cuda]
+    ports: ["127.0.0.1:18081:8080"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${CHEAP_GPU:-0}"]
+              capabilities: [gpu]
+  strong:
+    <<: *worker
+    healthcheck:
+      test: [CMD, python, /opt/router-healthcheck.py, strong]
+      interval: 10s
+      timeout: 10s
+      start_period: 10m
+      retries: 3
+    image: ghcr.io/superlinked/sie-server:v0.10.1-cuda13-sglang-cu130@sha256:b9262c56066e97d6d1892c57edf96140d951316aa1fd7929bf6eb1424d9d6c81
+    command: [serve, --host, 0.0.0.0, --port, "8080", --models-dir, /app/models, --models, Qwen/Qwen3.8-27B-FP8, --preload, Qwen/Qwen3.8-27B-FP8, --device, cuda]
+    ports: ["127.0.0.1:18082:8080"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${STRONG_GPU:-1}"]
+              capabilities: [gpu]
+  encoder:
+    <<: *worker
+    healthcheck:
+      test: [CMD, python, /opt/router-healthcheck.py, encoder]
+      interval: 10s
+      timeout: 10s
+      start_period: 10m
+      retries: 3
+    image: sie-train-a-router-encoder:975d5309
+    build:
+      context: https://github.com/superlinked/sie.git#975d5309ba3af9eaeb13725b20dcf10d906c3e2a
+      dockerfile: packages/sie_server/Dockerfile.cuda12
+      args:
+        BUNDLE: sglang-embedding
+        SIE_SRC_REV: 975d5309ba3af9eaeb13725b20dcf10d906c3e2a
+    command: [serve, --host, 0.0.0.0, --port, "8080", --models-dir, /app/models, --models, Qwen/Qwen3-Embedding-4B, --preload, Qwen/Qwen3-Embedding-4B, --device, cuda]
+    ports: ["127.0.0.1:18083:8080"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ENCODER_GPU:-2}"]
+              capabilities: [gpu]
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    network_mode: host
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on: [cheap, strong, encoder]
+
+volumes:
+  model-cache:

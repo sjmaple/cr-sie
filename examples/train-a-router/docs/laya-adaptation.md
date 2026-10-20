@@ -28,12 +28,12 @@ We use one fixed recipe so that the stages remain understandable:
 - Start from the English Laya checkpoint and keep the input questions fixed.
 - Train rank-16 attention adapters and the complete native decision head.
 - Learn two actual answer-correctness targets, one for each answer model.
-- Choose the number of epochs on held-out training papers, then refit all
+- Choose the number of epochs on held-out training families, then refit all
   training examples and choose the routing cutoff on separate calibration data.
-- Repeat the same recipe with 503 and 2,503 training questions.
+- Repeat the same recipe with 500 and 2,000 training questions.
 - Check that merging and saving the adapters preserves the decision scores.
 
-Our labels are hard correctness outcomes from independently reviewed answers.
+Our labels say whether each recorded answer matches the dataset's reference.
 The teacher-label stage substitutes a teacher-generated reference and compares
 it with a matched reference-label control. It does not treat the teacher's
 self-reported confidence as a verified probability of correctness.

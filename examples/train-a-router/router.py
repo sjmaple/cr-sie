@@ -17,9 +17,9 @@ import json
 import sys
 from pathlib import Path
 
-import benefit_route
+import arithmetic_replay
+import arithmetic_route
 import evidence
-import outcomes_replay
 
 COMMANDS = ("fetch", "replay", "prepare", "fit-native", "fit-embedding", "fit-teacher", "evaluate", "answer")
 
@@ -30,7 +30,7 @@ def main(argv=None):
     arguments = sys.argv[1:] if argv is None else argv
     args, remaining = parser.parse_args(arguments[:1]), arguments[1:]
     if args.command not in ("fetch", "answer"):
-        outcomes_replay.main([args.command, *remaining])
+        arithmetic_replay.main([args.command, *remaining])
         return
     command = argparse.ArgumentParser(prog=f"router.py {args.command}")
     command.add_argument("--study", type=Path, default=Path("evidence"))
@@ -41,43 +41,26 @@ def main(argv=None):
         )
         selected = command.parse_args(remaining)
         evidence.fetch(
-            selected.study, solver_study=True, solver_records=selected.records, solver_weights=selected.weights
+            selected.study, arithmetic_study=True,
+            solver_records=selected.records, solver_weights=selected.weights,
         )
         return
     command.add_argument("--run", type=Path, help="Your prepared/trained folder; omit to use the recorded router")
-    command.add_argument("--population", choices=outcomes_replay.POPULATIONS, default="expanded")
-    command.add_argument("--method", choices=("embedding", "lora", "laya"), default="embedding")
-    command.add_argument("--contest", choices=benefit_route.CONTESTS, required=True)
+    command.add_argument("--population", choices=arithmetic_replay.POPULATIONS, default="expanded")
+    command.add_argument("--method", choices=("embedding", "lora", "laya", "teacher"), default="embedding")
     command.add_argument("--question", required=True)
     command.add_argument("--target", type=int, choices=(0, 1, 2, 5), default=1)
     command.add_argument("--output", type=Path, required=True)
     command.add_argument("--self-hosted", action="store_true")
     command.add_argument(
-        "--device", choices=("cpu", "cuda", "mps"), default="cpu", help="Local native inference device"
+        "--device", choices=("cpu", "cuda"),
+        default="cpu", help="Local native inference device"
     )
     selected = command.parse_args(remaining)
-    population = selected.population
-    native_run = None
-    if selected.run:
-        outcomes_replay.checked_run(selected.run, selected.study)
-        head = selected.run / ("heads" if selected.method == "embedding" else "reference-heads") / population
-        if selected.method != "embedding":
-            native_run = selected.run / "native" / population
-    else:
-        source = outcomes_replay.reference(selected.study)
-        head = source / "heads" / population
-        if selected.method != "embedding":
-            native_run = source / "native" / population
-    result = benefit_route.answer(
-        head,
-        selected.output,
-        selected.contest,
-        selected.question,
-        selected.target,
-        self_hosted=selected.self_hosted,
-        native_run=native_run,
-        variant="base" if selected.method == "laya" else "lora",
-        device=selected.device,
+    result = arithmetic_route.answer(
+        selected.study, selected.output, selected.question, run=selected.run,
+        population=selected.population, method=selected.method, target=selected.target,
+        self_hosted=selected.self_hosted, device=selected.device,
     )
     print(json.dumps(result, indent=2))
 

@@ -1,147 +1,206 @@
 # Train a router that saves money
 
-Send each request to a smaller model when it is likely to give a good answer,
-and pay for the stronger model when its extra capability is useful. This
-example measures the result in **dollars saved and answer quality lost**,
-compared with always using the stronger model.
+Use a smaller answer model when it is likely to succeed, and pay for the stronger
+model when its extra capability is useful. This example measures **dollars
+saved and correct answers lost**, compared with always using the stronger model.
 
-For the command-only walkthrough, use the [one-page quickstart](QUICKSTART.md).
+On **3,000 separate test questions**, the embedding router trained on 2,000
+examples saves **20.9%** with a **0.47-point quality gap** at the primary
+setting. A second setting, also chosen before testing, saves **33.8%** with
+a **0.83-point gap**. That reduces the estimated bill from **$9.51 to $6.30
+per 10,000 questions**, with about **83 fewer correct answers**.
+The two settings trade money against answer quality; neither guarantees
+the same result on a different workload.
 
-**Draft: final experiment results below are PENDING.**
-
-Follow these five steps. Each uses the same answer models and evaluation
-questions, so you can see what each change contributes:
+Follow these steps, or use the [one-page quickstart](QUICKSTART.md):
 
 1. **Establish the always-strong baseline** [savings **0%**; quality gap **0 points**].
-2. **Use the unchanged Laya decision model** [answer cost savings **PENDING**; gap **PENDING**].
-3. **Adapt Laya with LoRA, then add more training examples** [answer cost savings **PENDING**; gap **PENDING**].
-4. **Train two small classifiers on Qwen embeddings** [net savings **PENDING**; gap **PENDING**].
-5. **Replace reference-based training labels with a teacher's labels** [net savings **PENDING**; gap **PENDING**].
+2. **Use the unchanged Laya decision model** [savings **21.6% before hosting**; quality gap **1.50 points**].
+3. **Adapt Laya with LoRA** [savings **16.4% before hosting**; quality gap **0.80 points**].
+4. **Train small classifiers on Qwen embeddings** [savings **20.9%**; quality gap **0.47 points**].
+5. **Train from a teacher's answers when answer keys are unavailable** [savings **19.7%**; quality gap **0.33 points**].
 
-All code is in this folder. The downloadable data, recorded answers, embeddings,
-and optional model weights belong to this example's Hugging Face bundle.
+All code is in this folder. The example's [Hugging Face download](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/71e0d5109e46f8b9c698806e7d3e47b2aa0da87d/evaluations/2026-10-19/train-a-router-arithmetic) contains the
+questions, answer keys, recorded predictions, embeddings, and optional model
+weights. You can reproduce the comparison without paying for those model calls
+again. LoRA is a full training stage and requires an NVIDIA CUDA machine.
 
 ## Dataset and the measures of success
 
-We use competition mathematics problems from
-[Easy2Hard-Bench](https://huggingface.co/datasets/furonghuang-lab/Easy2Hard-Bench).
-For each question, we record answers from **Qwen3.5-4B** and
-**Qwen3.8-27B-FP8**, then check whether each final answer matches a reviewed
-reference. The router learns two practical questions: **Will the smaller model
-answer correctly? Will the stronger model answer correctly?**
+We use arithmetic word problems from [GSM8K](https://github.com/openai/grade-school-math).
+For every question, we record answers from **Qwen3.5-4B** and
+**Qwen3.8-27B-FP8**, then check their final answers against the dataset's answer
+key. A router learns when the 27B model is worth its extra cost.
 
-The router sees only the problem text and competition name. Reference answers
-and correctness labels are used for training and evaluation.
-
-| Group | Reviewed questions | Purpose |
+| Group | Questions | Purpose |
 | --- | ---: | --- |
-| Original training set | 503 | Fit a router with a modest labeling budget. |
-| Expanded training set | 2,503 | Add examples from the same training competitions and years. |
-| Calibration | 242 | Choose when the stronger model is worth its extra cost. |
-| Main test | 463 | Measure the saved decisions on later competition problems. |
+| Small training set | 500 | Start with fewer labeled examples. |
+| Expanded training set | 2,000 | Repeat the same recipe with more examples; includes the 500-question set. |
+| Calibration | 1,000 | Choose the score cutoff for sending a question to 27B. |
+| Test | 3,000 | Measure the saved models and cutoffs on separate questions. |
 
-Separate training exam papers select training settings. Calibration chooses
-the **cutoff**, the score above which a request goes to the stronger model.
-The models and cutoffs are saved before examining test answers. Duplicate
-families stay out of different groups. This separation covers our router's
-training; we cannot establish what the original models saw during pretraining.
-After exploratory training, we amended the source review to exclude
-missing-context questions and correct references, before opening the held-out
-answer-model results. The downloadable review records those decisions.
+The routers see the question text, not the answer key or either model's answer.
+Training labels record whether each answer model was correct. Both models can
+succeed, both can fail, and sometimes only the smaller one succeeds.
 
-- **Answer accuracy:** percentage of correct final answers. Equivalent forms
-  such as `1/2` and `0.5` count as the same answer.
+We group duplicates and similar question templates before splitting the data.
+No detected family crosses training, calibration, and test. The 2,000 training
+questions had already been used during development; calibration and test use
+previously unused families. These study groups differ from GSM8K's official
+split: training contains its 1,319 official test questions and 681 official
+training questions; our calibration and test questions come from the remaining
+official training split. These are custom routing results, not standard GSM8K
+benchmark scores. The checks do not establish what the foundation models saw during
+pretraining. See the [measurement method](docs/methodology.md) for the complete
+split, grading, and review rules.
+
+- **Answer accuracy:** the percentage of correct final answers. Equivalent
+  numeric forms, such as `1/2` and `0.5`, count as equal.
 - **Quality gap:** always-strong accuracy minus routed accuracy, in percentage
-  points. A change from 90% to 89% is a **1-point** gap, or 100 fewer correct
-  answers per 10,000 requests. We also count answers recovered when the smaller
-  model succeeds and the stronger one fails.
-- **Cost per 10,000 requests:** the selected answer-model charges plus the known
-  cost of deciding where to send each request.
-- **Savings:** the reduction from the always-strong bill. A drop from $100 to $70
-  per 10,000 requests is **30% savings**. For locally hosted Laya, we report
-  answer-model savings and the remaining allowance for router hosting; its
-  unmeasured hosting cost is not treated as zero.
+  points. Dropping from 96% to 95% is a **1-point gap**: 100 fewer correct answers
+  per 10,000 questions. Gains when only the smaller model succeeds count too.
+- **Savings:** the percentage reduction in cost versus always using 27B. A
+  drop from $100 to $70 is **30% savings**.
+- **Cost per 10,000 questions:** the chosen answer-model charges plus known
+  router charges. The report also keeps costs per 1,000 for other traffic levels.
 
-The primary setting allows a **1-point gap on calibration**, then measures the
-actual test gap. The 463-question test cannot establish a guaranteed 1-point
-gap on future requests. The report also keeps 0-, 2-, and 5-point targets and
-shows 95% uncertainty intervals, estimated by resampling questions while
-keeping each pair of model answers together. Dollar tables scale the
-recorded workload to 10,000 requests; the JSON retains per-1,000 values.
+The main comparison chooses cutoffs for a **1-point gap on calibration**, then
+measures the actual test gap. That setting is not a guarantee on new questions.
+The report includes 95% uncertainty intervals and all four declared targets:
+0, 1, 2, and 5 points.
+
+**Primary setting: a 1-point calibration target, evaluated on 3,000 test questions.**
+
+| Method | Answer accuracy | Quality gap, points (95% interval) | Cost / 10,000 | Savings |
+| --- | ---: | ---: | ---: | ---: |
+| Always Qwen 27B | 95.90% | 0.00 (0.00–0.00) | $9.51 | 0.0% |
+| Always Qwen 4B | 91.03% | 4.87 (3.97–5.93) | $2.29 | 75.9% |
+| Laya, unchanged | 94.40% | 1.50 (0.97–2.07) | $7.46 + hosting | 21.6% |
+| Laya + LoRA, 2,000 examples | 95.10% | 0.80 (0.40–1.23) | $7.95 + hosting | 16.4% |
+| Embeddings + classifiers, 2,000 examples | 95.43% | 0.47 (0.07–0.87) | $7.52 | 20.9% |
+| Embeddings + teacher labels, 1,539 examples | 95.57% | 0.33 (0.03–0.67) | $7.63 | 19.7% |
+| Same 1,539 questions, reference labels | 95.30% | 0.60 (0.20–1.03) | $7.41 | 22.0% |
+
+Answer costs use recorded physical token counts and a saved SIE Cloud price
+table; they are Cloud-price estimates. Embedding savings include observed
+embedding credits, shared across the questions in each collection batch:
+about **$0.059 per 10,000 questions**. The one-question timing calls used one
+credit each, equivalent to **$0.10 per 10,000** at that rate; individual calls
+can therefore cost slightly more than the recorded batches. Laya's hosting cost
+is unpriced, so its savings are **before router hosting**. Training and teacher
+labeling are separate one-time expenses.
+
+At the primary setting, LoRA reduces the unchanged decision model's
+quality gap from **1.50 to 0.80 points**, while saving less on answer calls.
+The embedding router then reaches **0.47 points** and saves **20.9%**,
+including its embedding bill. These are the recorded point estimates;
+the intervals show the uncertainty in each quality gap.
+
+**Secondary setting: a 2-point calibration target.** The same saved models
+use a more permissive cutoff, chosen before opening the test answers.
+
+| Method | Savings | Measured test gap, points (95% interval) |
+| --- | ---: | ---: |
+| Laya, unchanged | 26.9% before hosting | 1.77 (1.17–2.43) |
+| Laya + LoRA, 2,000 examples | 29.4% before hosting | 1.53 (0.97–2.17) |
+| Embeddings + classifiers, 2,000 examples | 33.8% | 0.83 (0.33–1.30) |
+| Embeddings + teacher labels, 1,539 examples | 35.2% | 1.03 (0.50–1.53) |
+| Same 1,539 questions, reference labels | 36.7% | 1.13 (0.60–1.67) |
+
+For the 2,000-example embedding router, secondary savings are **33.8%**
+(95% interval **32.0–35.6%**). Its **0.83-point** test gap has an interval
+of **0.33–1.30 points**; this does not establish a guaranteed gap below
+one point. The primary setting remains the main comparison. Both are
+available as saved rules: `--target 1` and `--target 2`.
+
+The full comparison plots retain both training sizes and the controls:
+[primary setting](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/71e0d5109e46f8b9c698806e7d3e47b2aa0da87d/evaluations/2026-10-19/train-a-router-arithmetic/arithmetic/figures/cost-and-quality-1pp.png)
+and [secondary setting](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/71e0d5109e46f8b9c698806e7d3e47b2aa0da87d/evaluations/2026-10-19/train-a-router-arithmetic/arithmetic/figures/cost-and-quality-2pp.png).
+
+The headings below show the primary setting, using 2,000 training
+examples except for the matched 1,539-example teacher comparison.
 
 ## Setup
 
 Install Git and [uv](https://docs.astral.sh/uv/getting-started/installation/).
-**CPU is sufficient to replay every recorded result and fit the embedding
-classifiers. To perform the LoRA stage yourself, use an NVIDIA CUDA machine**,
-locally or rented, including a Modal GPU shell. The reference uses an H100.
-Run the training commands inside that machine's checkout; SIE Cloud supplies
-inference, while your GPU machine performs training.
+For the complete walkthrough, use **an NVIDIA CUDA machine**, locally or rented.
+The reference LoRA training ran on a Modal H100; a
+[Modal GPU shell](https://modal.com/docs/cli/latest/shell) is one way to rent a
+machine. Run the training commands inside that machine's checkout. The remaining training and
+replay steps work on CPU with the saved embeddings. SIE Cloud supplies the
+embedding and answer models for new requests; the CUDA machine trains Laya.
 
 From the root of a clone of this repository:
 
 ```sh
-# Enter this example and install the locked CPU replay and classifier dependencies.
+# Enter the example and install its locked replay and classifier dependencies.
 cd examples/train-a-router
 uv sync --frozen --group outcomes
 ```
 
 ```sh
-# Download this example's verified dataset, embeddings, and recorded comparison.
+# Download the verified data, recorded results, and embeddings for this example.
 uv run --frozen --group outcomes python router.py fetch --study evidence
 ```
 
-`evidence/` holds references; `run-output/` holds your results. Repeated runs
-need fresh output directories.
-
-**PENDING publication:** the download command is implemented but its final
-Hugging Face revision and manifest must be pinned before this draft is released.
+`evidence/` contains the downloaded reference material. `run-output/` contains
+your results. The default download is about **159 MB**. Use a fresh output
+directory when repeating a command.
 
 <a id="baseline"></a>
 
 ## 1. Establish the always-strong baseline [savings 0%; quality gap 0 points]
 
-**CPU.** Recompute the complete comparison from saved answers and decisions.
+**CPU.** Recompute the comparison from saved answers and routing decisions.
 This makes no model calls and needs no API key.
 
 ```sh
-# Recompute the cost and answer-quality tables from the downloaded evidence.
+# Recompute costs, answer accuracy, and uncertainty intervals for the saved decisions.
 uv run --frozen --group outcomes python router.py replay \
   --study evidence --output run-output/replay
 ```
 
-Open `run-output/replay/comparison.md`. The first row sends every question to
-Qwen 27B: accuracy **PENDING**, cost **PENDING per 10,000 requests**. The
-always-Qwen-4B row shows the cheapest fixed choice and its quality gap.
+Open `run-output/replay/comparison.md`. Always using 27B answers **95.90%** correctly at an estimated **$9.51 per
+10,000 questions**. Always using 4B costs **$2.29**, but accuracy falls to
+**91.03%**: a **4.87-point gap**, or about 487 fewer correct answers per
+10,000. The router aims to keep much of the saving while recovering
+most of those answers.
 
-Every router selects between the same two recorded answers per question.
-The main comparison uses measured SIE Cloud answer charges; replaying it adds
-no inference cost.
+Every router chooses between the same two recorded answers for each question.
+That isolates the effect of its routing choices from variation in newly
+generated answers. Replaying the published results is a reproduction;
+further experiments need new test questions.
 
 <a id="laya"></a>
 
-## 2. Use Laya [answer cost savings PENDING; quality gap PENDING]
+## 2. Use Laya [savings **21.6% before hosting**; quality gap **1.50 points**]
 
-**CPU for replay; optional local CPU or NVIDIA GPU for new decisions.** Laya
-is a decision model: it scores choices instead of writing a full answer.
-Here it estimates each answer model's chance of being correct. Compare the
-**Laya unchanged** rows in the report from step 1.
+**CPU for replay; CPU or NVIDIA GPU for new decisions.** Laya is a decision
+model: it scores possible choices instead of generating an answer. Here it
+predicts whether each of the two answer models will be correct.
 
-Its weights remain unchanged. Training examples supply expected costs, and
-calibration sets the cutoff. Laya has roughly 421 million parameters—the
-numerical weights stored in a model.
+Start with **Laya, unchanged; costs from 2,000 examples** in the report. Its roughly 421 million
+model weights stay fixed. Training records supply expected answer costs, and
+calibration chooses the cutoff. The baseline uses the same cost estimates as
+the corresponding LoRA run, so their comparison isolates the effect of
+adapting the weights.
+
+The unchanged decision model saves **21.6% before hosting**, but its
+**1.50-point** test gap exceeds the one-point calibration target. It
+provides a concrete baseline for learning the decisions from our own
+answer outcomes.
 
 <a id="lora"></a>
 
-## 3. Adapt Laya with LoRA [answer cost savings PENDING; quality gap PENDING]
+## 3. Adapt Laya with LoRA [savings **16.4% before hosting**; quality gap **0.80 points**]
 
-**NVIDIA CUDA GPU for training; CPU for replaying the resulting table.**
-LoRA trains small added weight updates while keeping most of Laya fixed.
-We also train its final decision layers. Both correctness questions share one
-model. Separate training papers select how long to train.
+**NVIDIA CUDA GPU for training; CPU for replay.** LoRA, or low-rank adaptation,
+trains small added weight updates while keeping most of Laya fixed. We also
+train its final decision layers. One shared model learns both correctness
+questions.
 
 ```sh
-# Create your own training folders without changing the downloaded reference results.
+# Create your own training folder while preserving the downloaded reference results.
 uv run --frozen --group outcomes python router.py prepare \
   --study evidence --output run-output/my-router
 ```
@@ -151,8 +210,11 @@ uv run --frozen --group outcomes python router.py prepare \
 uv sync --frozen --group outcomes --group training
 ```
 
+The first training run also downloads the public Laya checkpoint. No SIE API
+key is needed for this stage.
+
 ```sh
-# Train and evaluate Laya on the original set, then repeat with the larger set.
+# Train and evaluate LoRA with 500 examples, then repeat the same recipe with 2,000.
 for population in original expanded; do
   uv run --frozen --group outcomes --group training python router.py fit-native \
     --study evidence --run run-output/my-router --population "$population"
@@ -162,25 +224,37 @@ for population in original expanded; do
 done
 ```
 
-Compare unchanged Laya with LoRA, then compare 503 with 2,503 training examples
-under the same recipe. **Training time, peak GPU memory, and training cost:
-PENDING.** Training is a one-time expense; hosting recurs for each request.
+One reserved portion of the training data, keeping whole question families
+together, chooses how many passes, or **epochs**, to make through the data.
+Selection checks zero through eight epochs, then starts
+again from the original checkpoint and trains on all training rows for the
+chosen duration. Calibration and test do not select that duration.
+
+With 500 examples, LoRA saves **14.9% before hosting** with a **1.17-point
+gap**. With 2,000 it saves **16.4%** with a **0.80-point gap**. At this
+primary setting, adaptation preserves more correct answers than
+unchanged Laya but spends more on 27B. At the secondary setting, the
+2,000-example LoRA reaches **29.4% savings / 1.53-point gap**, compared
+with unchanged Laya's **26.9% / 1.77 points**. The full report retains
+both training sizes and every declared cutoff target.
+
+The reference runs selected one epoch for both training sizes. Selecting,
+fitting, and exporting took **2.4 minutes for 500 examples** and **8.1 minutes
+for 2,000**, excluding environment startup. The allocated H100 lifetime, including
+startup and input scoring, was **18.4 minutes**: about **$1.48** at the recorded
+hardware rate, an estimate rather than an invoice.
 
 <a id="embedding-router"></a>
 
-## 4. Train the embedding router [net savings PENDING; quality gap PENDING]
+## 4. Train the embedding router [savings **20.9%**; quality gap **0.47 points**]
 
-**CPU with the supplied embeddings.** Qwen3-Embedding-4B turns each question
-into a list of 2,560 numbers describing its text. Two small **logistic
-classifiers** learn from those numbers: one predicts whether Qwen 4B will be
-correct, and the other predicts whether Qwen 27B will be correct.
-
-The routing score is the predicted quality improvement divided by expected
-extra cost. Cost estimates come from training records; they never use a new
-question's future answer length or correctness.
+**CPU with saved embeddings.** Qwen3-Embedding-4B converts each question into
+2,560 numbers representing its text. Two small probability models, called
+**logistic classifiers**, learn from those numbers: one predicts correctness
+for Qwen 4B, the other for Qwen 27B. The encoder stays fixed.
 
 ```sh
-# Fit and evaluate both training sizes on CPU using the saved Qwen embeddings.
+# Fit and evaluate the two classifier training sizes using the saved Qwen embeddings.
 for population in original expanded; do
   uv run --frozen --group outcomes python router.py fit-embedding \
     --study evidence --run run-output/my-router --population "$population"
@@ -190,122 +264,163 @@ for population in original expanded; do
 done
 ```
 
-Requests scored by this router need one embedding call; both classifiers then
-run on CPU. A fixed choice skips that call. Net savings include the API charge.
-Local application and classifier CPU costs are unpriced.
-The 4B encoder is roughly ten times larger than Laya, so this comparison includes
-model capacity as well as training design.
+The routing score is the predicted improvement in correctness divided by the
+expected extra cost of using 27B. Expected costs come from training records;
+the router never sees a new question's future answer length or correctness.
+
+With 500 examples, this router saves **18.2%** with a **0.70-point gap**.
+With 2,000 it reaches **20.9% / 0.47 points**: lower measured cost and
+higher answer accuracy than the 2,000-example LoRA run. The corresponding
+secondary setting reaches **33.8% / 0.83 points**.
+
+More data does not automatically increase savings at every setting:
+the 500-example secondary rule saves **43.9%** but loses **1.73 points**.
+Inspect both measures together; a higher saving alone can simply mean
+sending more questions to the cheaper model.
+
+New requests need one embedding call and two small CPU calculations. Adding
+training data does not increase that work. It changes which questions go to
+27B, which can increase or decrease the answer bill. A saved rule that always
+chooses one model skips the embedding call. Classifier fitting took **6 seconds
+for 500 examples** and **11 seconds for 2,000** on the reference CPU worker.
 
 <a id="teacher-labels"></a>
 
-## 5. Train from teacher labels [net savings PENDING; quality gap PENDING]
+## 5. Train from teacher labels [savings **19.7%**; quality gap **0.33 points**]
 
-**CPU for the recorded comparison; a teacher API or hosted model for new
-labels.** When reference answers are unavailable, ask a stronger teacher to
-solve each training question independently. Compare both answer models' saved
-answers with that reference to obtain the two correctness labels, then train
-the same classifiers.
+**CPU with recorded teacher answers.** When answer keys are unavailable, ask a
+strong teacher to solve the training questions independently. Compare both
+answer models' outputs with the teacher's reference, then train the same two
+classifiers. The teacher sees neither the benchmark answer nor the two outputs.
 
-The recorded teacher is **gpt-6-astra**. Of the 2,503 training questions,
-**2,426** have a teacher reference that the fixed grader can use; 77 have
-unsupported answer forms or units. This rule uses the teacher reference and
-question, without looking at either answer model's response. The matched
-reference-label control uses exactly those same 2,426 questions, embeddings,
-and training settings, isolating the label change. The teacher-derived labels
-agree with the reviewed reference labels on **99.6%** of smaller-model answers
-and **99.4%** of stronger-model answers. This is a training-data diagnostic;
-the held-out routing result is measured separately. Known teacher usage for
-all 2,503 training questions was **$39.05**, including unusable references and
-known failed attempts. Provider calls with unknown usage are recorded
-separately, so this is not a complete invoice. Check a sample and disagreements
-before trusting generated references.
+The recorded teacher is **GPT-6 Astra**, which supplied 1,539 independent numeric
+references. Both teacher-label and
+reference-label classifiers use exactly those same 1,539 questions, with the
+same settings and training groups. The remaining questions were unavailable;
+they were not removed based on correctness.
+
+Teacher references agree with the answer key on **98.25%** of these training
+questions. The derived correctness labels agree on **98.70%** of cheap-model
+answers and **98.51%** of strong-model answers. These training-label checks
+are separate from the held-out routing comparison. Incorrect teacher answers
+remain in the teacher labels.
 
 ```sh
-# Refit the teacher-label router and its matched reference-label control on CPU.
+# Refit the teacher-label classifiers and a reference-label control on the same questions.
 uv run --frozen --group outcomes python router.py fit-teacher \
-  --study evidence --run run-output/my-router --population expanded
+  --study evidence --run run-output/my-router
 uv run --frozen --group outcomes python router.py evaluate \
-  --study evidence --run run-output/my-router --population expanded \
-  --method teacher --output run-output/teacher-comparison.json
+  --study evidence --run run-output/my-router --method teacher \
+  --output run-output/teacher-comparison.json
 ```
 
-These commands reuse the recorded teacher answers and incur no labeling
-charges. New teacher labels require a separate acquisition run with an explicit
-provider/model and spending limit. Calibration and test still use the reviewed
-benchmark references for both routers.
+The teacher-label router saves **19.7%** with a **0.33-point gap** at
+the primary setting. The same-question reference-label control saves
+**22.0%** with a **0.60-point gap**. At the secondary setting, the pair
+reaches **35.2% / 1.03 points** and **36.7% / 1.13 points**, respectively.
+Teacher labels support a useful router here; these differing cutoffs
+do not establish that teacher labels are better than reference labels.
+
+These commands reuse the recorded references and incur no labeling charges.
+The numeric teacher run used **$6.40** of known API usage; an earlier formatting
+run used **$8.75**. Unknown usage is retained separately, so this is not a
+complete invoice. Calibration and test still use the benchmark answer key.
+Without any existing labels, keep a small independently reviewed sample to
+check quality; agreement with the training teacher alone is insufficient.
 
 ## Use your router with SIE Cloud or your own server
 
 Create an account and API key in the [SIE Console](https://console.superlinked.com).
-Use the available free credits shown in your account for model calls. Replaying
-and fitting from downloaded records uses no Cloud credits.
+Use the free credits shown in your account for new model calls. Replaying
+and training from the downloaded records uses no SIE credits.
 
 ```sh
-# Point the SDK at SIE Cloud and provide the API key from your console account.
+# Connect the SDK to SIE Cloud using the API key from your console account.
 export SIE_BASE_URL=https://api.superlinked.com
 export SIE_API_KEY='paste-your-key'
 ```
 
 ```sh
-# Route a new problem with your trained embedding router and save its answer and charges.
+# Select an answer model for a new question and save its answer and observed API charges.
 uv run --frozen --group outcomes python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method embedding --contest AMC10 \
+  --study evidence --run run-output/my-router --method embedding \
   --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
   --target 1 --output run-output/cloud-answer
 ```
 
-The output records the chosen model, answer, and API charges. `--target 1`
-selects the calibrated cutoff. A new answer is not automatically graded.
-
-For your own running SIE deployment, use the same command with its endpoint and
-`--self-hosted`. It must expose the pinned 4B and 27B answer models and the
-Qwen4B embedding model, including structured final-answer support.
+The result records the chosen model, answer, and API charges. `--target 1`
+selects the saved calibration rule; it does not guarantee a correct answer.
+Use `--method teacher` for the classifiers trained from teacher labels. For
+your adapted decision model, include its inference dependencies:
 
 ```sh
-# Send the same routed request to a locally running, unauthenticated SIE deployment.
-SIE_BASE_URL=http://127.0.0.1:8080 SIE_API_KEY='' \
-  uv run --frozen --group outcomes python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method embedding --contest AMC10 \
+# Load your adapted Laya router on CPU and use SIE Cloud for the chosen answer model.
+uv run --frozen --group outcomes --group training python router.py answer \
+  --study evidence --run run-output/my-router --method lora --device cpu \
   --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
-  --target 1 --self-hosted --output run-output/local-answer
+  --target 1 --output run-output/lora-cloud-answer
 ```
 
-Use your deployment's key instead of the empty value if it requires one.
-Changing the URL selects a server; it does not start the models. Self-hosted
-compute needs separate hardware-cost accounting. **PENDING: the complete
-public multi-model launch recipe must accompany this example.**
+Use `--device cuda` for NVIDIA inference. Omit `--run` to use recorded routers.
+Recorded Laya inference needs the optional weights download; your own trained
+checkpoint already contains its weights. The optional recorded checkpoint
+bundle is about **10.1 GB**:
 
-## Serving trade-offs and a separate transfer check
+```sh
+# Fetch the optional decision-model checkpoints for using recorded Laya routers.
+uv run --frozen --group outcomes python router.py fetch --study evidence --weights
+```
 
-| Design | Work for a new routed request | Costs to keep separate |
+The [self-hosted setup](self-host/README.md) supplies a three-model SIE deployment
+for Linux and NVIDIA GPUs. Its validation hardware uses three H100 80 GB GPUs,
+one per model. That full inference setup is larger than the single GPU needed
+for LoRA training. After starting your own endpoint:
+
+```sh
+# Use the same router against the supplied trusted local SIE deployment.
+SIE_BASE_URL=http://127.0.0.1:8080 SIE_API_KEY='' \
+uv run --frozen --group outcomes python router.py answer \
+  --study evidence --run run-output/my-router --method embedding \
+  --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
+  --target 1 --self-hosted --output run-output/self-hosted-answer
+```
+
+Use your deployment's API key if it requires authentication. The flag accepts
+responses without Cloud billing receipts and preserves model checks. It does
+not start the server. Model components and the routed SDK request passed
+Modal GPU validation; the complete Docker Compose stack has not been run as
+one deployment.
+
+## Serving cost, speed, and model size
+
+| Router | Work per routed request | What you train |
 | --- | --- | --- |
-| Always strong | One Qwen 27B answer, plus a final-answer formatting call when needed | Answer generation |
-| Laya / Laya + LoRA | Two correctness decisions through one shared local Laya model, then the chosen answer model | Router hosting, answer generation; LoRA training once |
-| Qwen embeddings + classifiers | One Qwen4B embedding API call, two small CPU calculations, then the chosen answer model | Embedding API, answer generation; classifier fitting once |
+| Laya / Laya + LoRA | Two correctness decisions through one shared 421-million-weight model | Small weight updates and its decision layers |
+| Qwen embeddings + classifiers | One 4-billion-weight encoder call, then two small CPU calculations | Two sets of 2,560 weights and a bias |
 
-The classifier is small, but new embeddings still require the 4B model. Laya
-has a smaller serving footprint. In a 20-question sequential Cloud probe,
-embedding plus classification took **184 ms median and 274 ms at the 95th
-percentile**, including network time; the local classifier calculation took
-**0.21 ms median**. This small probe is separate from the quality evaluation.
-Native inference measurements are **PENDING**. These are serving setups with
-different hardware, not a controlled hardware comparison. Command-line startup
-and concurrent throughput need separate measurement.
+The embedding encoder is roughly ten times larger than Laya. Architecture,
+pretraining, and model size all differ; this comparison does not isolate which
+causes a performance difference. Laya is smaller to host. Using the Cloud
+embedding endpoint avoids hosting the encoder yourself.
 
-We also apply the saved routers and cutoffs to a separate **2,000-question
-arithmetic transfer sample** from
-[GSM8K](https://huggingface.co/datasets/openai/gsm8k), without retraining.
-It combines 1,319 official test questions with 681 official training questions
-never used for our routers. It tests a different problem distribution and does
-not enlarge the competition test. This custom study has its own
-`arithmetic-transfer.md`; quality gap and savings are **PENDING**. Its
-self-hosted answers use token-based Cloud-price estimates rather than measured
-Cloud bills. It is not a standard GSM8K leaderboard score.
+We timed the same 20 training questions sequentially after one warmup:
 
-See [how the experiment is designed](docs/methodology.md) and
-[how to run and measure a live router](docs/serving.md) for more detail.
+| Router and setup | Median | 95th percentile |
+| --- | ---: | ---: |
+| LoRA on a resident Modal H100 | 15.23 ms | 16.00 ms |
+| The same LoRA on a Modal CPU worker | 436.77 ms | 550.16 ms |
+| SIE Cloud embedding + classifiers, including network time | 107.67 ms | 128.58 ms |
 
-Published results support reproduction. Use new evaluation questions when
-assessing further development after studying this test set.
+The classifier calculation alone took **0.36 ms median**. Native timings
+exclude model loading and HTTP transport. These are different serving setups,
+not equal-hardware or concurrent-throughput comparisons. The one-question CLI
+loads Laya each time; its startup is slower than resident-model inference.
+
+Laya's answer-model savings are the maximum amount you can spend on hosting
+the router before breaking even. A GPU kept idle between requests can consume
+those savings. The embedding API has a per-use charge, already included in
+the embedding-router table; the small classifier's CPU work remains unpriced.
+
+Use the [serving guide](docs/serving.md) to repeat the timing checks and account
+for router hosting. The [methodology](docs/methodology.md) explains the frozen
+decisions, teacher comparison, cost estimates, and uncertainty intervals.

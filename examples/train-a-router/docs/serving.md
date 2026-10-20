@@ -1,112 +1,105 @@
-# Run a trained router on new requests
+# Run your router on new requests
 
-The router predicts whether paying for the stronger answer model is worthwhile,
-then calls either Qwen3.5-4B or Qwen3.8-27B-FP8. Its job is to reduce the answer
-bill while keeping answer quality close to always using the stronger model.
-Follow the [README](../README.md) to prepare and train the models; this page
-covers using them and understanding their serving costs. The
-[methodology](methodology.md) explains the labels, cost estimates and evaluation.
+A router adds work before answer generation. Whether it is worthwhile depends
+on the money it saves, the quality it preserves, and the time and infrastructure
+needed to make each decision. Follow the [README](../README.md) to train it;
+this page covers live use and serving trade-offs.
 
 ## What runs for each request
 
-| | Unchanged Laya or Laya with LoRA | Qwen embeddings + two classifiers |
+| | Laya decision model | Qwen embeddings + two classifiers |
 | --- | --- | --- |
-| Main router model | About 421 million parameters | About 4 billion parameters |
-| Work before choosing an answer model | Two correctness questions through one shared Laya checkpoint | One embedding call, then two small CPU calculations |
-| What is learned | LoRA updates and the decision head; unchanged Laya keeps its published weights | Two logistic classifiers, each with 2,560 weights and a bias; the encoder stays fixed |
-| Live routing | Local Python inference on CPU or NVIDIA CUDA | SIE Cloud or a self-hosted encoder; classifiers run locally on CPU |
-| Training requirement | NVIDIA CUDA GPU for LoRA; a rented GPU such as Modal works | CPU when the saved embeddings are available |
+| Router size | About 421 million parameters | About 4 billion encoder parameters, plus two tiny classifiers |
+| Decision work | Two correctness questions through one shared checkpoint | One embedding call, then two weighted sums on CPU |
+| What training changes | Rank-16 attention LoRA updates and the decision head | Two sets of 2,560 weights and a bias; the encoder stays fixed |
+| Where inference runs | Your CPU or NVIDIA CUDA machine | Encoder in SIE Cloud or your SIE server; classifiers on your CPU |
+| Training requirement | NVIDIA CUDA GPU | CPU with the downloaded embeddings |
 
-Both approaches estimate the correctness of each answer model and its expected
-cost. The saved cutoff selects the model to call. If calibration selected an
-explicit always-strong or always-cheap policy, live routing skips the decision
-model or embedding call entirely.
+The LoRA updates are merged into the saved checkpoint. More training examples
+do not increase either router's model size or number of inference calls. Qwen
+is roughly ten times larger than Laya, with different architecture and
+pretraining. This comparison does not isolate parameter count as the cause
+of a quality difference.
 
-LoRA updates are merged into the exported Laya weights, so serving does not
-require a separate adapter step. More training examples do not increase either
-router's parameter count or number of model calls. Qwen is roughly ten times
-larger than Laya and has different architecture and pretraining. A quality
-difference between these recipes does not establish which difference caused it.
+The saved cutoff chooses the answer model. An always-strong or always-cheap
+policy skips router inference entirely.
 
-## Use SIE Cloud from your computer
+## Use SIE Cloud
 
-Run these commands from `examples/train-a-router` after the README has created
-`evidence` and trained `run-output/my-router`. The embedding route needs no
-local GPU. Create an API key in the [SIE Console](https://console.superlinked.com)
-and use your account's available credits. Set the URL explicitly so the
-destination is clear in each terminal.
+Run these commands from `examples/train-a-router` after preparing and training
+`run-output/my-router`. Create an account and API key in the
+[SIE Console](https://console.superlinked.com), then use the credits available
+in your account. The embedding route runs from a laptop without a local model.
 
 ```sh
-# Install the CPU dependencies and point the SDK at your SIE Cloud account.
+# Install the CPU dependencies and connect the SDK to your SIE Cloud account.
 uv sync --frozen --group outcomes
 export SIE_BASE_URL=https://api.superlinked.com
 export SIE_API_KEY='paste-your-key'
 ```
 
 ```sh
-# Embed a new question, apply your two classifiers, and call the selected answer model.
+# Embed one new arithmetic question, select an answer model, and request its answer.
 uv run --frozen --group outcomes python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method embedding --contest AMC10 \
+  --study evidence --run run-output/my-router --method embedding \
   --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
   --target 1 --output run-output/cloud-answer
 ```
 
-`--target 1` chooses the saved rule whose calibration quality loss target was
-one percentage point. It does not guarantee the correctness of this answer or
-the same quality gap on future traffic. Use a new output directory for each
-request. The directory saves the routing decision, answer and API receipts;
-`result.json` reports the selected model and observed API credits. A new
-question is not graded because no reference answer was supplied.
-
-To use your adapted decision model, keep the same Cloud connection for the
-answer models and run Laya locally:
+The output directory contains the decision, answer, and API receipts.
+`result.json` reports the selected model and observed credits. The new answer
+is not graded because you did not supply an answer key. Use a fresh output
+folder for each request. `--target 1` selects the rule calibrated for a
+one-point quality gap; it does not guarantee this particular answer is correct.
 
 ```sh
-# Load your trained Laya weights on CPU, choose a model, and request its answer from Cloud.
+# Run your adapted Laya checkpoint on CPU and use SIE Cloud for the selected answer model.
 uv run --frozen --group outcomes --group training python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method lora --device cpu --contest AMC10 \
+  --study evidence --run run-output/my-router --method lora --device cpu \
   --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
   --target 1 --output run-output/lora-cloud-answer
 ```
 
-Use `--method laya` for the unchanged decision model, or `--device cuda` for
-local NVIDIA inference. CPU inference does not remove the GPU requirement for
-the earlier LoRA training step. Omitting `--run` selects the recorded routers
-from the evidence bundle; live Laya then also needs the optional checkpoint
-files downloaded by `router.py fetch --weights`.
-
-Each answer uses one initial generation call, plus at most one final-answer
-formatting call if the initial response is truncated or lacks a final answer.
-There are no automatic inference retries. Failures preserve an incomplete
-receipt for inspection before another attempt.
-
-## Connect to an existing self-hosted SIE endpoint
-
-The same public `SIEClient` interface supports your own endpoint. For the
-embedding route, it must expose the encoder and both answer models listed
-below. A local Laya route only needs the two answer models at that endpoint.
+Use `--device cuda` for NVIDIA inference. `--method teacher` uses the classifiers
+trained from teacher labels; `--method laya` uses the unchanged decision model.
+Omit `--run` to use the recorded routers from the download. Recorded Laya
+inference also needs the optional model files:
 
 ```sh
-# Use an already running local SIE endpoint with the required pinned models.
+# Download the optional verified decision-model checkpoints for local inference.
+uv run --frozen --group outcomes python router.py fetch --study evidence --weights
+```
+
+Each answer uses one initial call and, only when needed, one final-answer
+formatting call. Inference is not automatically retried. A failed request
+leaves a receipt to inspect before trying again. Both answer models and their
+formatting calls passed separate live production checks.
+
+## Run the same models on your own SIE server
+
+The [self-hosted setup](../self-host/README.md) supplies this example's pinned
+model configurations and a Docker Compose launcher. It requires Linux and
+three NVIDIA GPUs; the validation hardware is H100 80 GB. The encoder, smaller
+answer model, and stronger answer model run in separate environments because
+their CUDA and SGLang requirements differ. This is the full inference setup;
+LoRA training alone needs one CUDA GPU.
+
+Once your endpoint is running, the same public `SIEClient` calls work:
+
+```sh
+# Send a routed question to the local three-model SIE deployment.
 SIE_BASE_URL=http://127.0.0.1:8080 SIE_API_KEY='' \
 uv run --frozen --group outcomes python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method embedding --contest AMC10 \
+  --study evidence --run run-output/my-router --method embedding \
   --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
   --target 1 --self-hosted --output run-output/self-hosted-answer
 ```
 
-Replace the URL and supply your deployment's key if it requires authentication.
-The empty key above is only for a local endpoint configured without API-key
-authentication. `--self-hosted` accepts responses without Cloud charge receipts;
-it keeps the model-revision checks and does not launch a server. Local GPU
-costs remain separate from API credits.
-
-### Model weights and execution environments
-
-The live commands check the model identity and immutable Hugging Face revision:
+The empty key is for the supplied trusted, local deployment. Use your own
+endpoint and key when connecting to an authenticated deployment.
+`--self-hosted` accepts responses without Cloud billing receipts; it keeps
+model-revision checks and does not start the server. Your GPU hosting costs
+remain separate from the report's equivalent Cloud-price estimates.
 
 | Purpose | Model | Pinned revision |
 | --- | --- | --- |
@@ -115,90 +108,76 @@ The live commands check the model identity and immutable Hugging Face revision:
 | Cheaper answer model | `Qwen/Qwen3.5-4B` | `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` |
 | Stronger answer model | `Qwen/Qwen3.8-27B-FP8` | `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a` |
 
-Laya's adapted checkpoint is checked against its saved file hashes. Embeddings
-also depend on the fixed instruction in [serving.py](../serving.py), vector
-dimension and normalization. Changing that instruction requires regenerating
-features and reevaluating the router.
+Embedding results also depend on the fixed instruction, dimensions, and
+normalization in [serving.py](../serving.py). Changing the encoder or instruction
+requires new embeddings, classifier training, and evaluation. Matching model
+weights alone does not guarantee identical outputs across runtimes or hardware.
 
-Matching model weights is only part of reproducing execution. The recorded
-answer collection used SGLang 0.5.10.post1 with CUDA 12 for the 4B model and
-SGLang 0.5.20 with CUDA 13 for the 27B model. The encoder used SGLang's embedding
-runtime. Those environments need isolation. The existing PyTorch embedding
-profile in `configs/` has not been checked for numerical equivalence with the
-recorded SGLang vectors. Hardware, precision and runtime changes can affect
-outputs even with identical weights.
+## Latency: compare warm decisions separately from startup
 
-The public [SIE Helm deployment](../../../deploy/helm/sie-cluster/README.md)
-supports a gateway with separate GPU worker groups for these runtimes. It is
-the supported advanced deployment path. This example does not yet have a
-tested compact launcher for all three models, or a tested three-model Helm
-overlay. Do not assume one default server process can reproduce their distinct
-runtime configurations. The recorded prompts, token limits and conditional
-final-answer protocol are defined in [solver.py](../solver.py).
+We measured the same 20 training questions, one at a time, after one separate
+warmup question. No answer generation is included.
 
-## Measure warm inference separately from startup
+| Router and serving setup | Median | 95th percentile |
+| --- | ---: | ---: |
+| Unchanged Laya, resident on a Modal H100 | 14.65 ms | 18.74 ms |
+| LoRA with 2,000 examples, resident on the same H100 | 15.23 ms | 16.00 ms |
+| The same LoRA checkpoint, resident on a Modal CPU worker | 436.77 ms | 550.16 ms |
+| SIE Cloud embedding + local classifiers, client on Modal CPU | 107.67 ms | 128.58 ms |
 
-The single-question CLI verifies the selected checkpoint and loads Laya anew
-on each invocation. Its saved `local_model_load_and_score_seconds` includes
-model loading; `local_router_end_to_end_seconds` also includes metadata and
-checkpoint checks. Neither is a persistent server's inference latency.
+The local classifier work in the embedding route took **0.36 ms median**.
+Most of its measured time is the embedding request and network round trip.
+The 21 Cloud calls used 21 credits, or **$0.00021**. The main quality report
+uses its own measured embedding charges; this small timing sample does not
+replace them.
 
-A persistent application keeps verified weights and its SDK client loaded,
-then reuses them for new requests. Compare routers after warmup on the same
-questions and hardware, with the same concurrency. Report router time
-separately from answer generation, and report both the median and the 95th
-percentile, which describes the slower end of the sample. Include network time
-when measuring Cloud calls. Startup and checkpoint download time belong in a
-separate measurement.
-
-The current Cloud probe used the same 20 hash-ordered training inputs as the
-native timing probe, one separate warmup, and one request at a time. Embedding
-plus classification took **184 ms median** and **274 ms at the 95th percentile**.
-The local scoring portion took **0.21 ms median**. The SDK ran on an Apple
-Silicon laptop; all embedding-model computation ran in SIE Cloud. Network time
-is included. No answer model was called by this probe.
-
-The 20 timed calls used **23 credits**, or **$0.00023**. That scales to about
-**$0.115 per 10,000 embedding calls for this small sample**. The main quality
-report uses its own measured embedding charges, collected in batches of 16;
-the timing probe does not replace those charges.
+Laya's measurement includes tokenization, both correctness predictions, and
+score calculation, with the model already loaded. It excludes HTTP. Cloud
+measurements include network time from a Modal CPU worker. These are different
+serving setups, not a comparison on equal hardware, and 20 sequential requests
+do not measure concurrent throughput. The native CPU probe used eight Torch
+threads and FP32 weights on a Modal worker; it is not a laptop measurement.
 
 ```sh
-# Time 20 Cloud embedding requests and their CPU classifier calculations after one warmup.
-uv run --frozen --group outcomes python benchmark_embedding_outcomes.py \
-  --run run-output/my-router/heads/expanded --baseline evidence/outcomes/baseline \
+# Time Cloud embedding decisions on the same saved 20 questions plus one warmup.
+uv run --frozen --group outcomes python benchmark_arithmetic.py \
+  --inputs evidence/arithmetic/timing/inputs.json \
+  --model run-output/my-router/embedding-2000.json \
   --output run-output/warm-embedding.json
 ```
 
-Use the same SIE connection variables as the live-answer commands. This probe
-makes 21 embedding calls, so it uses API credits. For an existing self-hosted
-endpoint, add `--self-hosted` and set its URL and key. A policy that always
-chooses one answer model would skip this work in deployment.
+This command makes 21 embedding calls. Add `--self-hosted` and set your endpoint
+variables to measure your own server.
 
-Native inference measurements are still pending. Cloud timings and direct
-Laya timings on a known GPU describe different serving setups; they are not a
-controlled comparison of equal hardware. The example's live CLI does not
-implement a persistent Laya service. This small sequential probe also does
-not measure concurrent throughput.
+```sh
+# On your CUDA machine, time your resident Laya router on the same questions.
+uv run --frozen --group outcomes --group training python benchmark_arithmetic_native.py \
+  --inputs evidence/arithmetic/timing/inputs.json \
+  --native run-output/my-router/native-2000 --device cuda --variant lora \
+  --output run-output/warm-laya.json
+```
 
-## Compare savings after serving costs
+Use `--device cpu` to measure your CPU. The timing comparison uses a fixed zero
+score threshold; it does not select or change a routing policy.
 
-The reports express dollars per **10,000 requests** alongside the answer-quality
-gap from always using the stronger model. The main evaluation uses observed
-Cloud answer charges, including conditional final-answer calls. Embedding
-routes also include their observed encoder API charges; the small local CPU
-calculation remains unpriced.
+The single-question answer CLI verifies and loads a Laya checkpoint each time.
+Its cold startup time is therefore larger than the warm numbers above. A
+persistent application keeps the verified model loaded and reuses it. Report
+checkpoint download, loading, router inference, and answer generation separately.
 
-For Laya, production hosting cost is still unpriced. Its answer-model savings
-are a **hosting allowance**: the maximum additional router spend before those
-savings disappear. For example, saving $20 in answer charges per 10,000 requests
-leaves at most $20 to run the router before breaking even. That is an
-illustration, not a measured result. Idle GPU time and utilization matter when
-turning this allowance into a deployment budget. A static policy that skips
-the router has zero router inference cost.
+## Turn savings into a hosting budget
 
-Training and teacher labeling are separate one-time costs. Self-hosted GPU
-charges also differ from the Cloud token-price estimates used for training
-cost prediction and the arithmetic transfer study. Keep these acquisition
-expenses, ongoing hosting expenses and per-request API charges separate when
-deciding whether a router saves money on your workload.
+An embedding call is cheap, but the router's **choice of answer model** can
+change the bill substantially. Sending more questions to 27B can increase the
+total cost even when embedding costs stay almost unchanged.
+
+The report's embedding savings include measured encoder credits. Laya's
+answer-model savings leave an allowance for hosting the router: if the answer
+bill falls by $20 per 10,000 requests, you can spend at most $20 on router
+hosting before those savings disappear. That is an example calculation;
+use the measured allowance for your chosen policy. Idle GPU time and utilization
+matter. Tiny local classifier CPU work is also unpriced.
+
+Training, teacher labeling, and collecting evaluation answers are separate
+one-time costs. The [methodology](methodology.md) explains which charges were
+observed and which are estimates from recorded token counts.

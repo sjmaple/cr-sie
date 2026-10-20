@@ -1,0 +1,6 @@
+FROM haproxy:3.2-bookworm@sha256:baecd003ae5c2376e58d04a5b2ffc7d82d30e9bebe2869f76222b819f719dee3
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends lua-cjson \
+    && rm -rf /var/lib/apt/lists/*
+USER haproxy
+COPY haproxy.cfg chat-model.lua /usr/local/etc/haproxy/

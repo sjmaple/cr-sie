@@ -1,4 +1,4 @@
-"""Check experiment isolation and verified downloads without network access."""
+"""Verify the arithmetic evidence download without network access."""
 
 import hashlib
 import io
@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import evidence
-import run
 
 
 def manifest(artifacts):
@@ -25,82 +24,86 @@ def manifest(artifacts):
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_followup_fetch_keeps_its_pin_separate_from_original_verification(self):
-        artifacts = {
-            "report.json": ("core", b"{}\n"),
-            "expanded/seed-89/lora/model.safetensors": ("seed89-lora", b"native weights"),
-            "other.bin": ("seed89-full", b"not requested"),
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+        self.artifacts = {
+            "arithmetic/study/report.json": ("core", b"{}\n"),
+            "arithmetic/embeddings/train/vectors.jsonl.gz": ("core", b"cached vectors"),
+            "arithmetic/study/native-2000/lora/model.safetensors": ("native-weights", b"native weights"),
+            "arithmetic/records/fresh.tar.gz": ("answers", b"raw records"),
         }
-        body, digest = manifest(artifacts)
-        base = f"{evidence.BASE_URL}followup-revision/{evidence.LORA_FOLDER}/"
-        requested = []
+        self.body, self.digest = manifest(self.artifacts)
+        self.base = f"{evidence.BASE_URL}arithmetic-revision/{evidence.ARITHMETIC_FOLDER}/"
+        self.requested = []
+        for patcher in (
+            patch.object(evidence, "ARITHMETIC_REVISION", "arithmetic-revision"),
+            patch.object(evidence, "ARITHMETIC_MANIFEST_SHA256", self.digest),
+            patch.object(evidence.urllib.request, "urlopen", side_effect=self.open_url),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-        def open_url(url, **kwargs):
-            requested.append(url)
-            self.assertTrue(url.startswith(base))
-            name = url.removeprefix(base)
-            return io.BytesIO(body if name == "manifest.json" else artifacts[name][1])
+    def open_url(self, url, **kwargs):
+        self.assertTrue(url.startswith(self.base))
+        name = url.removeprefix(self.base)
+        self.requested.append(name)
+        return io.BytesIO(self.body if name == "manifest.json" else self.artifacts[name][1])
 
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            with (
-                patch.object(evidence, "LORA_REVISION", "followup-revision"),
-                patch.object(evidence, "LORA_MANIFEST_SHA256", digest),
-                patch.object(evidence.urllib.request, "urlopen", side_effect=open_url),
-            ):
-                evidence.fetch(directory, "lora", lora_study=True)
-            self.assertEqual((directory / "expanded/seed-89/lora/model.safetensors").read_bytes(), b"native weights")
-            self.assertFalse((directory / "other.bin").exists())
-            self.assertEqual(len(requested), 3)
-            evidence.verify(directory, manifest_sha256=digest)
-            with self.assertRaisesRegex(ValueError, "pinned public experiment"):
-                evidence.verify(directory)
+    def test_default_download_has_cached_data_but_no_weights_or_raw_answers(self):
+        evidence.fetch(self.directory, arithmetic_study=True)
+        core = {name for name, (group, _) in self.artifacts.items() if group == "core"}
+        self.assertEqual(set(self.requested), {"manifest.json", *core})
+        evidence.verify(self.directory, manifest_sha256=self.digest)
+        self.assertFalse((self.directory / "arithmetic/study/native-2000/lora/model.safetensors").exists())
+        self.assertFalse((self.directory / "arithmetic/records/fresh.tar.gz").exists())
 
-    def test_original_fetch_retains_original_pin_and_both_weights(self):
-        artifacts = {
-            "report.json": ("core", b"{}"),
-            "full.bin": ("seed89-full", b"full"),
-            "lora.bin": ("seed89-lora", b"lora"),
-        }
-        body, digest = manifest(artifacts)
-        base = f"{evidence.BASE_URL}{evidence.REVISION}/{evidence.FOLDER}/"
-
-        def open_url(url, **kwargs):
-            self.assertTrue(url.startswith(base))
-            name = url.removeprefix(base)
-            return io.BytesIO(body if name == "manifest.json" else artifacts[name][1])
-
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            with (
-                patch.object(evidence, "MANIFEST_SHA256", digest),
-                patch.object(evidence.urllib.request, "urlopen", side_effect=open_url),
-            ):
-                evidence.fetch(directory, "both")
-                evidence.verify(directory)
-            self.assertEqual((directory / "full.bin").read_bytes(), b"full")
-            self.assertEqual((directory / "lora.bin").read_bytes(), b"lora")
+    def test_weights_and_raw_records_are_independent_optional_downloads(self):
+        evidence.fetch(self.directory, arithmetic_study=True, solver_weights=True)
+        self.assertEqual((self.directory / "arithmetic/study/native-2000/lora/model.safetensors").read_bytes(), b"native weights")
+        self.assertFalse((self.directory / "arithmetic/records/fresh.tar.gz").exists())
+        self.requested.clear()
+        evidence.fetch(self.directory, arithmetic_study=True, solver_records=True)
+        self.assertEqual(self.requested, ["manifest.json", "arithmetic/records/fresh.tar.gz"])
+        self.assertEqual((self.directory / "manifest.json").read_bytes(), self.body)
 
     def test_different_manifest_is_rejected_before_network_access(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            (directory / "manifest.json").write_bytes(b"another experiment")
-            with (
-                patch.object(evidence, "LORA_REVISION", "followup-revision"),
-                patch.object(evidence, "LORA_MANIFEST_SHA256", "0" * 64),
-                patch.object(evidence.urllib.request, "urlopen") as download,
-            ):
-                with self.assertRaisesRegex(ValueError, "different experiment"):
-                    evidence.fetch(directory, lora_study=True)
-                download.assert_not_called()
-            self.assertEqual((directory / "manifest.json").read_bytes(), b"another experiment")
+        (self.directory / "manifest.json").write_bytes(b"another experiment")
+        with self.assertRaisesRegex(ValueError, "different experiment"):
+            evidence.fetch(self.directory, arithmetic_study=True)
+        self.assertEqual(self.requested, [])
+        self.assertEqual((self.directory / "manifest.json").read_bytes(), b"another experiment")
 
-    def test_followup_rejects_full_weights_before_network_access(self):
-        with patch.object(evidence.urllib.request, "urlopen") as download:
-            for weights in ("full", "both"):
-                with self.subTest(weights=weights), self.assertRaisesRegex(ValueError, "only --weights lora"):
-                    evidence.fetch(Path("unused"), weights, lora_study=True)
-            download.assert_not_called()
+    def test_changed_cached_file_is_rejected_without_overwriting_it(self):
+        evidence.fetch(self.directory, arithmetic_study=True)
+        path = self.directory / "arithmetic/study/report.json"
+        path.write_bytes(b"changed")
+        self.requested.clear()
+        with self.assertRaisesRegex(ValueError, "Artifact hash/size differs"):
+            evidence.fetch(self.directory, arithmetic_study=True)
+        self.assertEqual(self.requested, ["manifest.json"])
+        self.assertEqual(path.read_bytes(), b"changed")
+
+    def test_corrupt_remote_file_is_not_installed_and_temporary_file_is_removed(self):
+        self.artifacts["arithmetic/study/report.json"] = ("core", b"[]\n")
+        with self.assertRaisesRegex(ValueError, "Artifact hash/size differs"):
+            evidence.fetch(self.directory, arithmetic_study=True)
+        self.assertFalse((self.directory / "arithmetic/study/report.json").exists())
+        self.assertFalse(list(self.directory.rglob(".download-*")))
+
+    def test_oversized_remote_file_is_not_installed(self):
+        self.artifacts["arithmetic/study/report.json"] = ("core", b"too much data")
+        with self.assertRaisesRegex(ValueError, "exceeds its declared size"):
+            evidence.fetch(self.directory, arithmetic_study=True)
+        self.assertFalse((self.directory / "arithmetic/study/report.json").exists())
+        self.assertFalse(list(self.directory.rglob(".download-*")))
+
+    def test_unsafe_manifest_paths_are_rejected(self):
+        for name in ("../outside", "/absolute", "folder\\outside", "folder/../outside"):
+            body, digest = manifest({name: ("core", b"contents")})
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unsafe artifact path"):
+                evidence.entries(body, manifest_sha256=digest)
 
     def test_manifest_allows_float32_checkpoint_but_keeps_size_bound(self):
         for size in (1_686_000_000, 2_000_000_001):
@@ -111,65 +114,6 @@ class EvidenceTests(unittest.TestCase):
             else:
                 with self.assertRaisesRegex(ValueError, "Invalid artifact size"):
                     evidence.entries(body, manifest_sha256=digest)
-
-    def test_cli_destinations_remain_separate_and_allow_explicit_output(self):
-        cases = (
-            (["fetch"], Path("evidence"), False),
-            (["fetch", "--lora-study"], Path("run-output/lora-study"), True),
-            (["fetch", "--lora-study", "--evidence", "custom-followup"], Path("custom-followup"), True),
-            (["fetch", "--solver-study"], Path("run-output/solver-study"), False),
-            (["fetch", "--solver-study", "--solver-records"], Path("run-output/solver-study"), False),
-            (["fetch", "--solver-study", "--solver-weights"], Path("run-output/solver-study"), False),
-        )
-        for arguments, directory, followup in cases:
-            with (
-                self.subTest(arguments=arguments),
-                patch("sys.argv", ["run.py", *arguments]),
-                patch.object(evidence, "fetch") as fetch,
-            ):
-                run.main()
-                fetch.assert_called_once_with(
-                    directory,
-                    None,
-                    lora_study=followup,
-                    solver_study="--solver-study" in arguments,
-                    solver_records="--solver-records" in arguments,
-                    solver_weights="--solver-weights" in arguments,
-                )
-
-    def test_solver_replay_downloads_weights_and_raw_answers_only_when_requested(self):
-        artifacts = {
-            "benefit/head/report.json": ("core", b"{}"),
-            "benefit/native/lora/model.safetensors": ("native-weights", b"weights"),
-            "training-records.tar.gz": ("answers", b"raw records"),
-        }
-        body, digest = manifest(artifacts)
-        base = f"{evidence.BASE_URL}solver-revision/{evidence.SOLVER_FOLDER}/"
-
-        def open_url(url, **kwargs):
-            self.assertTrue(url.startswith(base))
-            name = url.removeprefix(base)
-            return io.BytesIO(body if name == "manifest.json" else artifacts[name][1])
-
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(evidence, "SOLVER_REVISION", "solver-revision"),
-            patch.object(evidence, "SOLVER_MANIFEST_SHA256", digest),
-            patch.object(evidence.urllib.request, "urlopen", side_effect=open_url),
-        ):
-            directory = Path(temporary)
-            evidence.fetch(directory, solver_study=True)
-            self.assertFalse((directory / "benefit/native/lora/model.safetensors").exists())
-            self.assertFalse((directory / "training-records.tar.gz").exists())
-            evidence.fetch(directory, solver_study=True, solver_weights=True)
-            self.assertTrue((directory / "benefit/native/lora/model.safetensors").exists())
-            self.assertFalse((directory / "training-records.tar.gz").exists())
-            evidence.fetch(directory, solver_study=True, solver_records=True)
-            self.assertTrue((directory / "training-records.tar.gz").exists())
-        with patch.object(evidence.urllib.request, "urlopen") as download:
-            with self.assertRaisesRegex(ValueError, "requires --solver-study"):
-                evidence.fetch(Path("unused"), solver_weights=True)
-            download.assert_not_called()
 
 
 if __name__ == "__main__":

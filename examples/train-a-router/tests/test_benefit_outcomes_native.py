@@ -39,6 +39,27 @@ def fake_laya():
 
 
 class NativeOutcomeMathTests(unittest.TestCase):
+    def test_float64_replay_rejects_broadcast_nonfinite_and_meaningful_drift(self):
+        values = np.array([[1e-5, 500.0], [0.0, 0.7]])
+        self.assertTrue(native._matches_recorded(values, np.nextafter(values, np.inf)))
+        for changed in (values[0], np.full_like(values, np.nan), np.full_like(values, np.inf), values + 1e-6):
+            with self.subTest(changed=changed.tolist()):
+                self.assertFalse(native._matches_recorded(values, changed))
+        self.assertFalse(native._matches_recorded([], []))
+
+    def test_known_replay_source_does_not_relax_any_other_dependency(self):
+        current = native.code_hashes()
+        historical = current | {"benefit_outcomes_native.py": next(iter(native.REPLAY_COMPATIBLE_NATIVE_SOURCES))}
+        self.assertTrue(native._source_matches(historical, replay=True))
+        self.assertFalse(native._source_matches(historical))
+        for changed in (
+            historical | {"benefit_outcomes_native.py": "f" * 64},
+            historical | {"finetune.py": "f" * 64},
+            historical | {"extra.py": "f" * 64},
+            {key: value for key, value in historical.items() if key != "benefit_outcomes.py"},
+        ):
+            self.assertFalse(native._source_matches(changed, replay=True))
+
     def test_two_questions_preserve_request_arm_and_incorrect_correct_order(self):
         rows = [{"id": "a", "request": "first"}, {"id": "b", "request": "second"}]
         targets = np.array([[0, 1], [1, 0]])
@@ -87,6 +108,18 @@ class NativeOutcomeMathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "NLL"):
                 native.selected_epoch(history, targets)
         self.assertTrue(np.isfinite(native.outcome_nll([[1000, -1000]], [[1, 0]])))
+
+    def test_epoch_tie_uses_recorded_losses_after_numeric_validation(self):
+        targets = [[0, 1]]
+        loss = native.outcome_nll([[0, 0]], targets)
+        history = [{"epoch": epoch, "margins": [[0, 0]], "summed_binary_nll": loss} for epoch in range(3)]
+        with (
+            patch.dict(native.PROTOCOL, {"selection_epochs": 2}),
+            patch.object(
+                native, "outcome_nll", side_effect=[np.nextafter(loss, np.inf), loss, np.nextafter(loss, -np.inf)]
+            ),
+        ):
+            self.assertEqual(native.selected_epoch(history, targets), 0)
 
 
 class NativeOutcomeLifecycleTests(unittest.TestCase):
@@ -240,6 +273,59 @@ class NativeOutcomeLifecycleTests(unittest.TestCase):
             native.checked_frozen(self.run, self.head_run, weights=True)
         receipt = native.authorize_test(self.run, self.head_run)
         self.assertEqual(receipt["checkpoint_verification"], "manifest-only")
+
+    def test_historical_training_replays_but_cannot_train_or_freeze_under_new_source(self):
+        historical = native.code_hashes() | {
+            "benefit_outcomes_native.py": next(iter(native.REPLAY_COMPATIBLE_NATIVE_SOURCES))
+        }
+        with patch.object(native, "code_hashes", return_value=historical):
+            fixtures.save(self.run / "plan.json", native.prepare(self.head_run))
+            self.freeze()
+        native.checked_frozen(self.run, self.head_run)
+        receipt = native.authorize_test(self.run, self.head_run)
+        self.assertEqual(receipt["replay_validation"]["training_source_code_sha256"], historical)
+        self.assertEqual(receipt["replay_validation"]["validator_source_code_sha256"], native.code_hashes())
+        (self.run / "frozen.json").unlink()
+        (self.run / "scoring-start.json").unlink()
+        for action in (
+            lambda: native.checked_plan(self.run, self.head_run),
+            lambda: native.freeze(self.run, self.head_run, self.fixture.baseline, self.fixture.original),
+        ):
+            with self.assertRaisesRegex(ValueError, "source"):
+                action()
+
+    def test_numeric_replay_preserves_stored_scores_and_cutoff_ties(self):
+        _, frozen = self.freeze()
+        original = outcomes.normalized_scores
+
+        def rounded(*args):
+            scores, costs = original(*args)
+            return np.nextafter(scores, -np.inf), np.nextafter(costs, np.inf)
+
+        with patch.object(outcomes, "normalized_scores", side_effect=rounded):
+            _, _, replayed = native.checked_frozen(self.run, self.head_run)
+        self.assertEqual(replayed, frozen)
+        thresholds = 0
+        for model in replayed["models"].values():
+            for policy in model["policies"].values():
+                if policy["mode"] == "threshold":
+                    thresholds += 1
+                    saved = np.asarray(model["scores"]["calibration"])
+                    self.assertTrue((saved == policy["cutoff"]).any())
+                    self.assertEqual((saved >= policy["cutoff"]).tolist(), policy["calibration_routes"])
+        self.assertGreater(thresholds, 0)
+        for field in ("scores", "costs"):
+
+            def changed(*args, field=field):
+                scores, costs = original(*args)
+                return (scores + 1e-9, costs) if field == "scores" else (scores, costs + 1e-6)
+
+            with (
+                self.subTest(field=field),
+                patch.object(outcomes, "normalized_scores", side_effect=changed),
+                self.assertRaisesRegex(ValueError, "ratio scores"),
+            ):
+                native.checked_frozen(self.run, self.head_run)
 
     def test_resealed_export_parity_and_epoch_selection_tampering_are_rejected(self):
         trained = self.trained()

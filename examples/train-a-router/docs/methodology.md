@@ -1,211 +1,229 @@
-# How we measure a money-saving router
+# How the comparison is measured
 
-A router is useful when it lowers the bill while keeping answer quality close
-to always using the stronger model. This example compares the same two answer
-models on the same questions: **Qwen3.5-4B** and **Qwen3.8-27B-FP8**.
+The router chooses between two answer models. We measure whether its choices
+save money while keeping final-answer accuracy close to always using the
+stronger model. Predicting a difficulty label is not the goal.
 
-The router sees the problem text and competition name. It never sees either
-model's answer, a reference solution, the year, the question number, or a human
-difficulty rating when making a decision.
+## Questions, labels, and independent evaluation
 
-## Data and separation between training and evaluation
+The questions come from [GSM8K](https://github.com/openai/grade-school-math),
+pinned to revision `3101c7d5072418e28b9008a6636bde82a006892c`.
+The download contains the source license and attribution.
 
-The questions come from a pinned copy of
-[Easy2Hard-Bench](https://huggingface.co/datasets/furonghuang-lab/Easy2Hard-Bench).
-We collect both answer models' responses, then check their final answers against
-reviewed references. Mathematical equivalents such as `1/2` and `0.5` count as
-equal. The metric measures final-answer correctness, not the completeness of a
-proof or the quality of the writing.
-
-| Group | Reviewed questions | What it controls |
+| Role | Questions | What can use their answers |
 | --- | ---: | --- |
-| Original training | 503 | A modest initial labeling budget. |
-| Expanded training | 2,503 | More examples from the same training papers. |
-| Calibration | 242 | The cutoff between the cheaper and stronger model. |
-| Main test | 463 | The final cost and answer-quality comparison. |
+| Small training set | 500 | Fit models and choose training settings. This is a subset of the expanded set. |
+| Expanded training set | 2,000 | Fit models and choose training settings. |
+| Calibration | 1,000 | Choose the routing cutoff after the models are trained. |
+| Test | 3,000 | Measure the saved models and cutoffs once. |
 
-Training uses competitions through 2017, calibration uses 2019, and the main
-test uses 2020 onward. The source data also retains a 2018 validation group;
-this recipe does not use it to choose models. Instead, model settings are
-selected on held-out papers within the training group. All problems from the
-same competition and year stay together in those folds.
+The 2,000 training questions had already been used for development. They are
+not counted as fresh test evidence: they contain all 1,319 official GSM8K test
+questions and 681 official training questions. The calibration and test questions were
+selected from unused families in the original GSM8K training split. Thus our
+study roles differ from the original benchmark's train/test split; the results
+are a custom routing evaluation, not standard GSM8K benchmark scores.
 
-Duplicate checks group exact text matches, similar word sequences, and text
-that matches after numbers are masked. Families crossing chronological groups
-are removed, and one representative is selected per remaining family. The
-original training set is a subset of the expanded set. Neither overlaps the
-calibration or test families. These checks cover our router training; they
-cannot establish what public problems the underlying models saw in pretraining.
+A **question family** groups exact duplicates and similar question templates.
+Before collecting fresh answers, we grouped normalized text and word shingles,
+then checked character four-gram similarity both with the original numbers and
+with numbers replaced by a placeholder. Similarity thresholds are 0.80 and
+0.85 respectively. The latter helps catch the same problem with different
+numbers. Every detected family stays within one study role; each fresh role
+uses only one representative per family. The 500-question subset also keeps
+whole families together.
 
-An explicit source review corrects references and excludes questions that
-cannot be answered from the supplied text, including incomplete tasks. That
-review was amended after exploratory training, before the corrected fits and
-before access to the held-out answer models' test results. The downloadable
-review retains the decisions and supporting proofs. Source exclusions do not
-remove a question merely because a model answered incorrectly.
+These checks found 6,751 unused families, enough for the 4,000 fresh questions.
+The source audit preserves the detected pairs and exclusions. Lexical checks
+cannot establish that all semantic relatives have been found, or that a model
+never saw GSM8K during its original pretraining.
 
-## What the router learns
+## Record both possible answers
 
-Each training question provides two labels:
+For each question, we record one answer from each model using fixed prompts,
+token limits, model revisions, and runtimes:
 
-| Smaller model | Stronger model | Meaning for routing |
-| --- | --- | --- |
-| Correct | Correct | The smaller model can save money. |
-| Wrong | Correct | Paying for the stronger model helps. |
-| Wrong | Wrong | Paying more does not recover this answer. |
-| Correct | Wrong | The smaller model also gives a better answer. |
+| Answer model | Initial output limit | Runtime used for fresh collection |
+| --- | ---: | --- |
+| Qwen3.5-4B | 1,536 tokens | SGLang 0.5.10.post1, CUDA 12 |
+| Qwen3.8-27B-FP8 | 3,072 tokens | SGLang 0.5.20, CUDA 13 |
 
-We keep all four cases. The models predict the probability that each answer
-model will be correct. Their difference estimates the stronger model's quality
-advantage. We divide that difference by the predicted extra answer cost to
-obtain the routing score:
+An initial answer that is truncated or lacks a final answer receives at most
+one additional 256-token call to extract its final answer. The corresponding
+charges are included. There is no retry based on an answer being incorrect.
+The recorded settings and model revisions are in [solver.py](../solver.py).
+
+Both answers are checked against the dataset's reference answer. Equivalent
+numeric forms count as equal. A small arithmetic adapter handles clock-hour
+answers; durations remain ordinary quantities. Unresolved parsing or unit
+comparisons are retained for review instead of silently dropping a question
+or treating the answer as wrong. The one calibration-format adjudication
+preserves the original verdict and binds the reviewed answer to its file hash.
+It was resolved before choosing the cutoffs.
+
+Every router is evaluated against these same recorded answer pairs. We do not
+regenerate answers separately for each router, which would mix routing changes
+with variation in answer generation.
+
+## Learn correctness and the value of an upgrade
+
+Each question supplies two labels: whether the cheaper model was correct and
+whether the stronger model was correct. Both can succeed; both can fail; the
+cheaper model can occasionally be the only one to succeed.
+
+The routers predict both correctness probabilities. Their routing score is:
 
 ```text
-predicted extra correct answers / predicted extra answer-model credits
+predicted improvement in correctness
+-----------------------------------
+predicted extra cost of the stronger answer
 ```
 
-The cost estimates come only from training records. For each answer model, we
-calculate its mean token cost when correct and when wrong, then weight those
-two means by its predicted correctness. A new request does not reveal its
-future answer length or correctness to the router. A one-credit denominator
-floor keeps the score defined when the estimated cost difference is very small.
+The denominator has a floor of one credit. Expected costs use four means from
+training only: each model's cost when correct and when incorrect. This matters
+because long, unsuccessful answers can cost more than short, successful ones.
+The stronger model is selected when this score is at or above the saved cutoff.
 
-## The decision-model approach
+The embedding approach keeps **Qwen3-Embedding-4B** fixed. Its 2,560-number
+representation feeds two logistic classifiers: each is a weighted sum plus a
+bias, followed by a conversion to a probability. Only those small classifiers
+are trained. Five folds of training families choose one shared regularization
+strength from `0.01, 0.1, 1, 10`, using prediction loss. Stronger regularization
+wins an exact tie. The final classifiers are refit on all training rows.
 
-Laya has roughly 421 million parameters. It combines a ModernBERT-large text
-encoder with a decision head: layers that score supplied choices instead of
-generating an answer. We ask two questions about the same problem, one for
-each answer model, with the choices `incorrect` and `correct`. Both questions
-use one shared Laya checkpoint.
+The decision-model approach uses one shared **Laya** checkpoint, based on
+ModernBERT-large, and asks it the same two correctness questions. The unchanged
+checkpoint is the baseline. Adaptation trains rank-16 attention LoRA updates
+and the complete decision head. The recipe uses seed 89, adapter learning rate
+0.0002, head learning rate 0.0001, dropout 0.05, and weight decay 0.01.
 
-The unchanged baseline uses the published weights. Training examples supply
-its cost estimates, and calibration supplies its routing cutoff. Its predicted
-probabilities should not be assumed to be perfectly calibrated.
+We check epochs 0 through 8 on one reserved training-family fold. **Epoch 0**
+means no adaptation. The epoch with the lowest combined prediction loss is
+selected, with earlier epochs winning ties. We then restart from the original
+checkpoint and train on all rows for that many epochs. Calibration and test
+outcomes never select the training duration. Both arithmetic training sizes
+selected one epoch. Adapter merging and checkpoint export are checked for
+score drift before use.
 
-LoRA adds rank-16 updates to the attention layers while most encoder weights
-stay fixed. We also train the complete decision head. Training uses the two
-correctness labels and cross-entropy, which penalizes confident wrong
-predictions. One held-out training-paper fold selects the number of epochs
-from zero through eight; an epoch is a pass through the training examples.
-The selection criterion is the summed negative log likelihood of both labels.
-Ties prefer the earlier epoch.
+For each training size, a matched unchanged-Laya control uses the same
+training-derived cost estimates as its adapted counterpart. Its weights stay
+fixed, and calibration chooses its own cutoff. This separates changing the
+weights from updating the expected answer costs. The controls were saved in a
+separate, hash-checked supplement before opening test answers; they do not
+replace or modify the original frozen comparison.
 
-We then start again from the original checkpoint and fit all eligible training
-questions for the selected number of epochs. The seed is 89. The original and
-expanded populations use the same recipe. Training runs on NVIDIA CUDA; no
-Apple-specific training result is substituted into this comparison.
+This comparison does not establish that LoRA generally beats full fine-tuning,
+or that a model's parameter count alone explains its performance.
 
-LoRA updates are merged into ordinary model weights. We save those weights at
-32-bit precision and check scores before merging, after merging, and after
-reloading. This catches export changes that could otherwise look like a
-training-quality difference.
+## Choose a cutoff, then open the test results
 
-## The embedding approach
+The primary target is an empirical **one-percentage-point quality gap on
+calibration**. We choose the lowest-cost qualifying cutoff, also considering
+always-cheap and always-strong policies. Secondary targets of 0, 2, and 5
+points are declared in advance and retained in the report.
 
-The fixed **Qwen3-Embedding-4B** model converts each request into 2,560 numbers.
-Two independent logistic classifiers predict the two correctness labels from
-those numbers. Each classifier has 2,560 weights and a bias; there are no
-hidden layers and Qwen's weights are not updated.
+The source plan aimed for at least 30% savings near a one-point quality gap.
+The primary 2,000-example embedding rule saves 20.87% with a 0.47-point test
+gap, so it does not reach that savings aim. The declared two-point calibration
+setting saves 33.77% with a 0.83-point test gap; its gap interval extends to
+1.30 points. We report that as a secondary operating point, without changing
+the primary comparison or claiming a guaranteed one-point bound.
 
-Five training-paper folds select a shared regularization strength from
-`0.01`, `0.1`, `1`, and `10`. Regularization discourages large classifier
-weights. Selection minimizes the combined negative log likelihood on the
-held-out folds; ties prefer stronger regularization. Both classifiers are then
-fitted to all training examples. The saved vectors make this fitting step
-possible on CPU.
+All model files, input-only test scores, and calibration cutoffs are saved
+before test answers are graded. A test result can exceed its calibration
+target: the target is not a guarantee. The public download contains the frozen
+decisions and test-access record. Replaying these published results is an
+**exposed reproduction**, not another blind experiment.
 
-The encoder, text instruction, and vector normalization stay fixed for both
-training sizes and both label sources. A new request normally needs one
-embedding call and two small CPU calculations. More training examples do not
-increase the number of embedding calls or classifier parameters.
+The report keeps additional controls: models trained on competition problems
+with their original cutoffs, and those same weights with arithmetic-only
+cutoff calibration. These distinguish adjusting the cutoff from training
+weights on the new workload. Their original training-derived cost means stay
+fixed. They are diagnostic comparisons, not extra stages learners must run.
 
-The encoder is roughly ten times larger than Laya. This is a comparison of
-practical recipes, with different model sizes and pretraining. It does not
-isolate which architectural difference causes a quality difference.
+Separate experiments used only the 2,000 exposed development questions. An
+answer-aware cascade, which inspects the cheaper model's answer before deciding
+whether to upgrade, was screened with training-fold validation. Two fixed
+changes to the cheaper solver's generation settings were also tested on all
+2,000 questions. Neither solver change met the improvement rule specified
+before collecting those answers. These diagnostics did not change the final
+model pair, trained routers, cutoffs, or test questions; their executed sources
+and results are retained as optional evidence, outside the walkthrough.
 
-## When reference labels are unavailable
+## Teacher labels when answer keys are unavailable
 
-The teacher comparison uses **gpt-6-astra** to solve each training problem from
-the question alone. It does not receive the benchmark answer or either smaller
-model's answer. Its final answer becomes the proposed reference for the two
-correctness labels.
+An independent **GPT-6 Astra** teacher receives the training questions
+using high reasoning effort. It sees only each question, never the benchmark
+reference or either answer model's output. The answer contract requests one
+number in the requested units, without unit text or currency symbols.
 
-Generic formatting checks determine whether a teacher reference can be used.
-For example, an unsupported answer form or an unresolved unit is recorded as
-unusable. Eligibility depends on the teacher reference itself, not on whether
-it agrees with the benchmark or makes either answer model look good. There is
-no fallback from a teacher label to the benchmark label.
+The numeric-format collection completed **1,539 of the planned 2,000
+references** before the provider account exhausted its credits. We closed
+that acquisition and preserved its incomplete collection record. The remaining
+461 questions are missing because of acquisition availability, not an answer
+quality filter. All 1,539 completed references satisfied the numeric contract;
+both teacher and reference-label classifiers use exactly those same questions.
 
-The matched reference-label control uses exactly the same eligible questions,
-vectors, paper folds, and training settings. Only the label source changes.
-Each version derives its cost estimates under its own labels. Calibration and
-test use the reviewed benchmark references for both versions, so teacher
-agreement is not mistaken for independently measured answer quality.
+A valid numeric reference is used to grade both answer models. Incorrect
+teacher answers remain in the training labels. We do not replace them with
+benchmark answers. A matched control trains the same classifiers with benchmark
+labels on exactly the same eligible questions and family folds. Comparing the
+two isolates the effect of the labeling pipeline, including the conditional
+cost means derived from those labels. A separate benchmark audit measures
+the teacher's reliability; it does not decide which teacher labels to retain.
+The teacher's references agree with the benchmark on **98.25%** of these
+training questions. The derived correctness labels agree on **98.70%** of
+cheaper-model answers and **98.51%** of stronger-model answers. These are
+training-label checks, separate from the held-out routing comparison.
 
-The public commands reuse recorded labels. Acquiring new labels is a separate
-one-time expense. A different teacher or a self-hosted 27B model is a new
-label-source experiment, not an established equivalent to this teacher.
+An earlier teacher run used a general mathematics answer format. Its unit text
+exposed limitations in the generic parser, so we preserved that attempt and
+collected the numeric-format run before opening the test results. The label
+cost report keeps these acquisition expenses separate from inference savings.
+Known numeric-run usage is **$6.40**; the earlier general-format acquisition
+used **$8.75**. Attempts without verified usage remain recorded separately,
+so these figures are usage-based estimates rather than a complete invoice.
 
-## Choose a cutoff before seeing test outcomes
+A numerically stable, algebraically equivalent logistic-loss calculation is
+used for both matched heads. It avoids floating-point cancellation; the
+objective, regularization grid, folds, and selection rule are unchanged.
 
-Calibration chooses the cheapest routing cutoff whose observed quality gap is
-within the declared target. The primary target is **one percentage point**;
-zero-, two-, and five-point targets are also reported. Always using the stronger
-model and always using the smaller model are explicit alternatives. Those
-fixed choices skip the router's inference call.
+The teacher stage replaces **training** answer keys. Calibration and test still
+use trusted benchmark answers. In a deployment without any labels, reserve a
+small independently reviewed sample for quality measurement; agreement with
+the training teacher alone cannot establish real answer quality.
 
-Every model and cutoff is saved before the held-out answer outcomes are opened.
-The answer recordings were collected earlier; access to their outcomes is the
-relevant boundary. The published receipts document that sequence. Once the
-results are public, rerunning the example is a reproduction on a known test
-set. Further development needs a fresh test for new generalization claims.
+## Money, uncertainty, and serving costs
 
-## Translate the result into money and quality
+Fresh answer generation runs on Modal. We estimate its equivalent Cloud cost
+from recorded physical-call token counts and a saved Cloud price table. These
+are **Cloud-price estimates**, not observed Cloud bills or Modal invoices.
+Embedding charges are observed Cloud credits, including the original collection
+batch size. One credit corresponds to $0.00001 in this report.
+
+For each router, the report sums the selected answer charges and, where
+applicable, the embedding charges. Training, data collection, teacher labeling,
+and idle hosting are separate expenses. Laya hosting is unpriced, so its
+reported answer-model savings are the maximum allowance for router hosting
+before breaking even. Tiny local classifier CPU work is also unpriced. If the
+selected policy always uses one model, it skips router inference entirely.
 
 **Quality gap** is always-strong accuracy minus routed accuracy, in percentage
-points. A change from 90% to 89% is a one-point gap: ten fewer correct answers
-per 1,000 requests. We report both lost correct answers and rescues where the
-smaller model succeeds while the stronger model fails. Losing five and rescuing
-two produces a net loss of three.
+points. It includes both answers lost by choosing the cheaper model and answers
+recovered when only that model succeeds. A one-point gap means 100 fewer
+correct answers per 10,000 requests, on average.
 
-**Answer-model savings** compare the selected answer charges with the
-always-strong charges. **Savings after known router charges** also subtract
-embedding API charges. Dollar tables show costs and savings per 10,000
-requests, scaled from this measured sample. They are workload estimates, not
-a quote for an arbitrary production workload.
+The training recipe uses one seed. More examples require more training work;
+this is not an experiment with a fixed compute budget across training sizes.
 
-Laya hosting has not been priced as a production service. For a threshold
-policy, its answer-model savings therefore provide a **hosting allowance**:
-the maximum extra router spend before those savings disappear. They are not
-net savings. Training and teacher labeling are separate one-time expenses.
-Embedding-router results include its measured API overhead, while the small
-local classifier calculation remains unpriced.
+The 95% intervals resample questions while keeping each pair of answers and
+its routing decision together. They describe sampling uncertainty on this
+workload, conditional on the saved models and rules. They do not include
+training-seed variation or adjust jointly for all comparisons, and do not
+protect against future domain changes. With 3,000 test
+questions, one changed answer is about 0.033 points; the actual uncertainty
+also depends on how often the two policies disagree in correctness.
 
-The main test uses measured SIE Cloud charges, including a conditional
-final-answer formatting call when needed. Training answers were collected
-through self-hosted SIE servers; their cost model uses actual token counts and
-recorded Cloud list prices. Those estimates are neither Cloud bills nor Modal
-GPU charges. Runtime and model revisions are recorded, but matching weights
-does not guarantee identical responses across serving environments.
-
-## Uncertainty and transfer to new questions
-
-A one-point calibration target is not a promise of at most one point of loss
-on future requests. The main test has 463 questions. Paired bootstrap intervals
-resample those questions with the routing policy fixed. They describe this
-sample's uncertainty but do not account for shared papers, model selection,
-solver randomness, or changing prices. One training seed does not establish
-stability across seeds.
-
-A separate 2,000-question arithmetic check applies the same saved routers and
-cutoffs without retraining. It contains 1,319 official GSM8K test questions and
-681 fixed-hash-selected official training questions unused by our routers.
-This is a custom transfer study, not a standard GSM8K leaderboard score or an
-extension of the competition test. Its generation costs are token-based
-Cloud-price estimates; its embedding charges are observed.
-
-Future improvements follow the same cycle: collect requests and independently
-verifiable outcomes, update training data, retrain, choose settings on
-development data, then evaluate on new questions. Both LoRA and the embedding
-classifiers support that cycle. Adding data is an intervention to measure,
-not a guarantee that the next version will improve.
+Warm latency is measured separately from checkpoint loading and answer
+generation. The [serving guide](serving.md) records hardware, network inclusion,
+and the limits of the small sequential timing sample.

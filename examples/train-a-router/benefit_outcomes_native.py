@@ -81,11 +81,59 @@ PLAN_FORMAT = "sie-solver-outcome-native-plan-v2"
 TRAINED_FORMAT = "sie-solver-outcome-native-trained-v1"
 FROZEN_FORMAT = "sie-solver-outcome-native-frozen-v1"
 ACCESS_FORMAT = "sie-solver-outcome-native-access-v1"
+# This revision differs only in replay validation: NumPy CPU kernels can round
+# float64 exp/logaddexp by a few ulps. Historical model/score/threshold bytes and
+# every other source hash stay authoritative. Never use this exception to train
+# or freeze under a historical plan with different executing source bytes.
+REPLAY_COMPATIBLE_NATIVE_SOURCES = frozenset({"611bc5c09e5d854c5a1528b683ac7eeca583c00a1e41812ec1e8f902e3e4f68a"})
+REPLAY_RTOL = 1e-12
+REPLAY_ATOL = 1e-15
 
 
 def code_hashes():
     return outcomes.code_hashes() | {
         name: file_hash(Path(__file__).with_name(name)) for name in ("benefit_outcomes_native.py", "finetune.py")
+    }
+
+
+def _source_matches(recorded, *, replay=False):
+    current = code_hashes()
+    if recorded == current:
+        return True
+    name = "benefit_outcomes_native.py"
+    return (
+        replay
+        and isinstance(recorded, dict)
+        and set(recorded) == set(current)
+        and recorded[name] in REPLAY_COMPATIBLE_NATIVE_SOURCES
+        and all(recorded[key] == value for key, value in current.items() if key != name)
+    )
+
+
+def _matches_recorded(recorded, recomputed):
+    """Validate derived float64 arithmetic, without replacing saved values."""
+    try:
+        saved, checked = np.asarray(recorded, dtype=float), np.asarray(recomputed, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return (
+        saved.shape == checked.shape
+        and saved.size > 0
+        and np.isfinite(saved).all()
+        and np.isfinite(checked).all()
+        and np.allclose(saved, checked, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    )
+
+
+def replay_validation(plan):
+    return {
+        "format": "sie-native-float64-replay-validation-v1",
+        "training_source_code_sha256": plan["source_code_sha256"],
+        "validator_source_code_sha256": code_hashes(),
+        "known_historical_native_source": plan["source_code_sha256"] != code_hashes(),
+        "rtol": REPLAY_RTOL,
+        "atol": REPLAY_ATOL,
+        "authoritative_values": "Stored scores, cutoffs, selection losses and exact tie decisions; arithmetic replay never replaces them",
     }
 
 
@@ -118,13 +166,13 @@ def prepare(head_run):
     )
 
 
-def checked_plan(run, head_run):
+def checked_plan(run, head_run, *, replay=False):
     plan = benefit.checked(outcomes.read(Path(run) / "plan.json"), PLAN_FORMAT)
     head = outcomes.checked_plan(plan["head_plan"])
     outcomes._require(
         plan["protocol"] == PROTOCOL
         and plan["questions"] == QUESTIONS
-        and plan["source_code_sha256"] == code_hashes()
+        and _source_matches(plan["source_code_sha256"], replay=replay)
         and plan["head_plan_sha256"] == file_hash(Path(head_run) / "plan.json")
         and outcomes.read(Path(head_run) / "plan.json") == head
         and all(
@@ -229,9 +277,10 @@ def selected_epoch(history, targets):
         [row["epoch"] for row in history] == list(range(PROTOCOL["selection_epochs"] + 1)),
         "Retain epoch0 and every declared native selection epoch",
     )
-    losses = [outcome_nll(row["margins"], y) for row in history]
+    losses = [row["summed_binary_nll"] for row in history]
+    recomputed = [outcome_nll(row["margins"], y) for row in history]
     outcomes._require(
-        all(row["summed_binary_nll"] == value for row, value in zip(history, losses, strict=True)),
+        _matches_recorded(losses, recomputed),
         "Preserved native margins do not reproduce the outcome NLL",
     )
     return min(range(len(losses)), key=lambda epoch: (losses[epoch], epoch))
@@ -549,9 +598,9 @@ def _manifest(run, variant, manifest, verify_weights):
             outcomes._require(file_hash(Path(run) / variant / path) == expected, "Native checkpoint bytes changed")
 
 
-def checked_trained(run, head_run, *, weights=False):
+def checked_trained(run, head_run, *, weights=False, replay=True):
     run = Path(run)
-    plan = checked_plan(run, head_run)
+    plan = checked_plan(run, head_run, replay=replay)
     head = plan["head_plan"]
     trained = benefit.checked(outcomes.read(run / "trained.json"), TRAINED_FORMAT)
     start = outcomes.read(run / "training-start.json")
@@ -692,7 +741,7 @@ def freeze(run, head_run, baseline, original_path, *, device="cuda"):
     _unopened(run, head_run)
     if (run / "frozen.json").exists() or (run / "scoring-start.json").exists():
         raise FileExistsError(run / "frozen.json")
-    plan, trained = checked_trained(run, head_run, weights=True)
+    plan, trained = checked_trained(run, head_run, weights=True, replay=False)
     head = plan["head_plan"]
     embedding = outcomes.checked_model(head_run)
     outcomes._require(
@@ -788,7 +837,8 @@ def checked_frozen(run, head_run, *, weights=False):
             )
             scores, costs = outcomes.normalized_scores(probabilities(values), trained["conditional_cost_statistics"])
             outcomes._require(
-                model["scores"][split] == scores.tolist() and model["expected_costs_proxy"][split] == costs.tolist(),
+                _matches_recorded(model["scores"][split], scores)
+                and _matches_recorded(model["expected_costs_proxy"][split], costs),
                 "Native ratio scores differ from canonical margins and training costs",
             )
         outcomes._require(
@@ -813,6 +863,7 @@ def authorize_test(run, head_run, *, verify_weights=False):
             "checkpoint_manifest_sha256": digest(trained["checkpoints"]),
             "checkpoint_verification": "local-bytes" if verify_weights else "manifest-only",
             "source_code_sha256": code_hashes(),
+            "replay_validation": replay_validation(plan),
         }
     )
 
@@ -829,6 +880,7 @@ def report(run, head_run, grades_path):
         and access["head_plan_sha256"] == plan["head_plan_sha256"]
         and access["checkpoint_manifest_sha256"] == digest(trained["checkpoints"])
         and access["source_code_sha256"] == code_hashes()
+        and access["replay_validation"] == replay_validation(plan)
         and shared["frozen_sha256"] == access["head_frozen_sha256"]
         and shared["plan_sha256"] == plan["head_plan_sha256"]
         and shared["selected_model_sha256"] == frozen["selected_embedding_sha256"]

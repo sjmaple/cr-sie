@@ -16,9 +16,12 @@ FOLDER = "evaluations/2026-10-18/train-a-router-grouped-v2"
 LORA_REVISION = "d884d137386ccc4c89eb6d78449197a4e4be9892"
 LORA_MANIFEST_SHA256 = "f9f2f521de0dc6bc1711e7695378702efc03a55f017d29b7e52dc6552ae5872f"
 LORA_FOLDER = "evaluations/2026-10-18/train-a-router-lora-followup"
-SOLVER_REVISION = "PENDING_PUBLICATION"
-SOLVER_MANIFEST_SHA256 = "PENDING_PUBLICATION"
+SOLVER_REVISION = "7810c9631d8fca236ea8a074bab86b25f2b3fa0e"
+SOLVER_MANIFEST_SHA256 = "9df32300204ac4f24ffcd032c824619ddf9d0db100179d8d947397d191db6a59"
 SOLVER_FOLDER = "evaluations/2026-10-19/train-a-router-answer-quality"
+ARITHMETIC_REVISION = "71e0d5109e46f8b9c698806e7d3e47b2aa0da87d"
+ARITHMETIC_MANIFEST_SHA256 = "45e0d829c043cb9aaec2ab77859a93a34fda0a3e8765ca89ca81d6e0461d725d"
+ARITHMETIC_FOLDER = "evaluations/2026-10-19/train-a-router-arithmetic"
 BASE_URL = "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/"
 
 
@@ -48,12 +51,18 @@ def verify(directory, *, manifest_sha256=None):
     return files
 
 
-def fetch(directory, weights=None, *, lora_study=False, solver_study=False, solver_records=False, solver_weights=False):
-    if solver_study and (lora_study or weights):
+def fetch(
+    directory, weights=None, *, lora_study=False, solver_study=False, arithmetic_study=False,
+    solver_records=False, solver_weights=False,
+):
+    if sum((lora_study, solver_study, arithmetic_study)) > 1:
+        raise ValueError("Choose one study")
+    answer_study = solver_study or arithmetic_study
+    if answer_study and weights:
         raise ValueError("Choose one study; solver evidence contains no router weights")
-    if solver_records and not solver_study:
+    if solver_records and not answer_study:
         raise ValueError("--solver-records requires --solver-study")
-    if solver_weights and not solver_study:
+    if solver_weights and not answer_study:
         raise ValueError("--solver-weights requires --solver-study")
     if lora_study and weights not in (None, "lora"):
         raise ValueError("The LoRA follow-up supports only --weights lora")
@@ -62,6 +71,8 @@ def fetch(directory, weights=None, *, lora_study=False, solver_study=False, solv
     manifest_sha256 = LORA_MANIFEST_SHA256 if lora_study else MANIFEST_SHA256
     if solver_study:
         revision, folder, manifest_sha256 = SOLVER_REVISION, SOLVER_FOLDER, SOLVER_MANIFEST_SHA256
+    if arithmetic_study:
+        revision, folder, manifest_sha256 = ARITHMETIC_REVISION, ARITHMETIC_FOLDER, ARITHMETIC_MANIFEST_SHA256
     if "PENDING_PUBLICATION" in (revision, manifest_sha256):
         raise RuntimeError("Public evidence has not been pinned yet")
     destination = directory / "manifest.json"
@@ -69,7 +80,7 @@ def fetch(directory, weights=None, *, lora_study=False, solver_study=False, solv
         raise ValueError("Destination contains a different experiment")
     base = f"{BASE_URL}{revision}/{folder}/"
     with urllib.request.urlopen(base + "manifest.json", timeout=60) as response:
-        body = response.read(2_000_001 if solver_study else 200_001)
+        body = response.read(2_000_001 if answer_study else 200_001)
     files = entries(body, manifest_sha256=manifest_sha256)
     directory.mkdir(parents=True, exist_ok=True)
     groups = {"core"}
