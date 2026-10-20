@@ -21,7 +21,10 @@ from sie_server.adapters.qwen2_flash_cross_encoder._prefix import (
     plan_shared_forward,
     prefix_key,
 )
-from sie_server.adapters.qwen2_flash_cross_encoder.adapter import Qwen2FlashCrossEncoderAdapter
+from sie_server.adapters.qwen2_flash_cross_encoder.adapter import (
+    QWEN3_DOCUMENT_SEPARATOR,
+    Qwen2FlashCrossEncoderAdapter,
+)
 from sie_server.core.loader import load_model_config
 from sie_server.types.inputs import Item
 
@@ -379,8 +382,10 @@ def test_a_repeated_question_is_tokenized_once(monkeypatch: pytest.MonkeyPatch) 
     )
     question = Item(text="is this message spam")
 
+    documents = {QWEN3_DOCUMENT_SEPARATOR + doc for doc in _DOCS}
+
     def beside_documents() -> list[str]:  # the stub's batched call encodes each document through ``encode``
-        return [text for text in encoded if text not in _DOCS]
+        return [text for text in encoded if text not in documents]
 
     first = adapter.score_pairs([question], [Item(text=_DOCS[0])], instruction="answer yes or no")
     # The prefix, and the question and the instruction alone for the token counts.
