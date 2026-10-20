@@ -75,7 +75,7 @@ def render_sglang_argv(config: ModelConfig, models_dir: Path) -> list[str]:
         mock.patch.object(_server, "launch_sglang_server", capture),
         mock.patch.object(generation, "_reasoning_control_token_ids", return_value={}),
         mock.patch.object(_memory, "device_memory", return_value=(80 * _memory.GIB, 80 * _memory.GIB)),
-        mock.patch.object(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB),
+        mock.patch.object(_memory.SGLangMemoryBudget, "reservation", _memory.SGLangReservation(8 * _memory.GIB)),
     ):
         try:
             if isinstance(adapter, SGLangGenerationAdapter):
