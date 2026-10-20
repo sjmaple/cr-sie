@@ -20,9 +20,9 @@ export ROUTER_DEVICE=mps
 ```
 
 Follow the [main walkthrough](../README.md#prerequisites-and-shared-setup) with
-`ROUTER_DEVICE=mps`: prepare the inputs, measure base Laya, train the 512-example
-adapter, and then train the 2,581-example adapter. Every native training and
-evaluation command accepts the same device setting. Use a new output directory
+`ROUTER_DEVICE=mps` to train on paired solver outcomes. The earlier
+[difficulty study](lora-study.md) uses the same runtime for its 512- and
+2,581-example training commands. Use a new output directory
 for each run. Several GB of disk space per run are needed for the base model,
 selected training state and merged checkpoint, in addition to the download cache.
 
@@ -42,10 +42,12 @@ For a CUDA machine, set `ROUTER_DEVICE=cuda` instead.
 | Evaluation batch | 4 | 16 |
 | Selected checkpoint export | FP32 | FP32 |
 
-The model, attention targets, rank, learning rates, eight epochs, validation
-selection and calibration rules are unchanged. Different precision, batch
-grouping and random-number streams can still change the selected epoch and final
-accuracy. The three-seed reference results in the main headings are CUDA results.
+Within each experiment, the model and training recipe stay fixed across device
+profiles. Different precision, batch grouping and random-number streams can
+still change the selected epoch and results. The benefit experiment chooses
+epochs using squared error on solver benefit; the earlier difficulty study
+uses its own validation criterion. Do not compare their accuracy numbers as
+though they measured the same task.
 
 The pinned Torch 2.9.1 checkpoint implementation does not restore MPS dropout
 state correctly in the tested non-reentrant path. A local probe reproduced the
@@ -66,6 +68,10 @@ uv run --frozen --group training python -m unittest discover \
 ```
 
 ## Validation scope
+
+The complete-run measurements below describe the earlier difficulty task.
+They establish that this training stack runs on Apple Silicon; the benefit
+experiment records its own training duration and selection history.
 
 The validation machine is an **Apple M3 Max with 128 GiB unified memory**, running
 macOS 26.2, Python 3.12.1, Laya 0.3.29, Torch 2.9.1, Transformers 4.57.6 and

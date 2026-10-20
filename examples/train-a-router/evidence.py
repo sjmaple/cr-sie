@@ -16,6 +16,9 @@ FOLDER = "evaluations/2026-10-18/train-a-router-grouped-v2"
 LORA_REVISION = "d884d137386ccc4c89eb6d78449197a4e4be9892"
 LORA_MANIFEST_SHA256 = "f9f2f521de0dc6bc1711e7695378702efc03a55f017d29b7e52dc6552ae5872f"
 LORA_FOLDER = "evaluations/2026-10-18/train-a-router-lora-followup"
+SOLVER_REVISION = "PENDING_PUBLICATION"
+SOLVER_MANIFEST_SHA256 = "PENDING_PUBLICATION"
+SOLVER_FOLDER = "evaluations/2026-10-19/train-a-router-answer-quality"
 BASE_URL = "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/"
 
 
@@ -45,12 +48,20 @@ def verify(directory, *, manifest_sha256=None):
     return files
 
 
-def fetch(directory, weights=None, *, lora_study=False):
+def fetch(directory, weights=None, *, lora_study=False, solver_study=False, solver_records=False, solver_weights=False):
+    if solver_study and (lora_study or weights):
+        raise ValueError("Choose one study; solver evidence contains no router weights")
+    if solver_records and not solver_study:
+        raise ValueError("--solver-records requires --solver-study")
+    if solver_weights and not solver_study:
+        raise ValueError("--solver-weights requires --solver-study")
     if lora_study and weights not in (None, "lora"):
         raise ValueError("The LoRA follow-up supports only --weights lora")
     revision = LORA_REVISION if lora_study else REVISION
     folder = LORA_FOLDER if lora_study else FOLDER
     manifest_sha256 = LORA_MANIFEST_SHA256 if lora_study else MANIFEST_SHA256
+    if solver_study:
+        revision, folder, manifest_sha256 = SOLVER_REVISION, SOLVER_FOLDER, SOLVER_MANIFEST_SHA256
     if "PENDING_PUBLICATION" in (revision, manifest_sha256):
         raise RuntimeError("Public evidence has not been pinned yet")
     destination = directory / "manifest.json"
@@ -58,10 +69,14 @@ def fetch(directory, weights=None, *, lora_study=False):
         raise ValueError("Destination contains a different experiment")
     base = f"{BASE_URL}{revision}/{folder}/"
     with urllib.request.urlopen(base + "manifest.json", timeout=60) as response:
-        body = response.read(200_001)
+        body = response.read(2_000_001 if solver_study else 200_001)
     files = entries(body, manifest_sha256=manifest_sha256)
     directory.mkdir(parents=True, exist_ok=True)
     groups = {"core"}
+    if solver_records:
+        groups.add("answers")
+    if solver_weights:
+        groups.add("native-weights")
     if weights:
         groups.update(f"seed89-{v}" for v in (("full", "lora") if weights == "both" else (weights,)))
     for name, expected in files.items():

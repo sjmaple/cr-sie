@@ -1,12 +1,13 @@
 # Supporting experiment: full fine-tuning versus LoRA
 
-The main walkthrough adapts Laya with LoRA and adds training data; follow its
-[decision-model training guide](lora-study.md) for those steps.
-Keeping its selected recipe fixed and expanding training from 512 to 2,581
-examples improved mean accuracy from **57.34% to 65.00%** across three seeds,
+This supplementary experiment predicts human difficulty categories. The
+[main walkthrough](../README.md) trains on solver outcomes instead, to measure
+answer quality and savings directly. The [difficulty-training guide](lora-study.md)
+keeps its selected recipe fixed while expanding training from 512 to 2,581
+examples. Mean difficulty accuracy improved from **57.34% to 65.00%** across three seeds,
 with **17.9% fewer errors** on the exposed regression benchmark. The guide covers
-CPU replay, training one router and local SIE serving. Qwen plus ridge remains
-the recommended policy at 72.03%; see [results](results.md) for the comparison.
+CPU replay, training one router and local SIE serving. Qwen plus ridge reaches
+72.03% difficulty accuracy; that number does not establish solver cost savings.
 
 The commands below reproduce the original 512-example, cross-entropy-selected
 comparison of full fine-tuning and LoRA. Those recipes average 57.48% and 55.74%

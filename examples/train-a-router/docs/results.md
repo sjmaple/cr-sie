@@ -1,15 +1,21 @@
 # Results for the router walkthrough
 
-The [walkthrough](../README.md) starts with a decision model, improves it with
-LoRA and more examples, then compares it with a classifier on frozen embeddings.
+The [walkthrough](../README.md) starts by measuring the answer quality and bill
+for always using the strongest answer model. It then trains a decision model,
+improves it with LoRA and more examples, and compares it with a classifier on
+fixed embeddings. The [paired-answer comparison](answer-quality.md) connects
+these routing decisions to answer quality and money saved.
 
-| Stage | Model | Training examples | Accuracy |
+The table below reports **difficulty-label accuracy**, a training diagnostic.
+It is separate from the percentage of mathematical problems answered correctly.
+
+| Stage | Model | Training examples | Difficulty accuracy |
 | --- | --- | ---: | ---: |
-| 1. Starting decision model | Calibrated base Laya | Unchanged weights | 53.65% |
-| 2. Adapt the decision model | Laya + LoRA + trained native head | 512 | 57.34% mean |
-| 3. Add native training examples | Same LoRA recipe | 2,581 | 65.00% mean |
-| 4. Change to frozen embeddings | Qwen3-Embedding-4B + ridge | 64 | 67.64% |
-| 5. Add classifier training examples | Same encoder and classifier family | 512 | 72.03% |
+| 2. Starting decision model | Calibrated base Laya | Unchanged weights | 53.65% |
+| 3. Adapt the decision model | Laya + LoRA + trained native head | 512 | 57.34% mean |
+| 4. Add native training examples | Same LoRA recipe | 2,581 | 65.00% mean |
+| 5. Change to fixed embeddings | Qwen3-Embedding-4B + ridge | 64 | 67.64% |
+| 6. Add classifier training examples | Same encoder and classifier family | 512 | 72.03% |
 
 These are measured designs, not a matched-budget causal ablation. Training
 counts exclude the shared 247 validation and 246 calibration examples, as well
@@ -23,7 +29,7 @@ regression benchmark** for LoRA development. A new prospective generalization
 claim requires a new evaluation population. Neither task accuracy nor model size
 alone establishes downstream solver quality, latency or monetary savings.
 
-## Step 1: measure calibrated Laya
+## Step 2: measure calibrated Laya
 
 Base Laya scores **53.65%** after fitting its cutoff on the calibration split.
 Its pretrained weights are unchanged, but this is not a label-free zero-shot
@@ -31,7 +37,7 @@ baseline. The main LoRA stages below use AUC selection and FP32 export, while
 the historical base recording uses the original export/runtime protocol. The
 512-to-2,581 LoRA comparison keeps those settings fixed.
 
-## Steps 2–3: adapt Laya and add training examples
+## Steps 3–4: adapt Laya and add training examples
 
 [Pinned LoRA evidence and checkpoints](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup)
 · [Comparison figure](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/d884d137386ccc4c89eb6d78449197a4e4be9892/evaluations/2026-10-18/train-a-router-lora-followup/figures/lora-study.png).
@@ -79,7 +85,7 @@ separates this response-time tradeoff from accuracy and explains how to repeat
 the measurement. Follow the [decision-model training guide](lora-study.md) to
 replay the comparison, train both sizes, or reproduce the complete study.
 
-## Steps 4–5: learn a classifier on frozen embeddings
+## Steps 5–6: learn a classifier on fixed embeddings
 
 [Pinned data, predictions and checkpoints](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/4136e68feaa90b5f50dce9f30df212982d393356/evaluations/2026-10-18/train-a-router-grouped-v2)
 · [Comparison figure](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/4136e68feaa90b5f50dce9f30df212982d393356/evaluations/2026-10-18/train-a-router-grouped-v2/figures/comparison.png)

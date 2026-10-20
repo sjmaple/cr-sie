@@ -1,7 +1,9 @@
-# Adapt the decision model with LoRA
+# Earlier experiment: adapt Laya to difficulty labels
 
-This guide covers **steps 2 and 3 of the [main walkthrough](../README.md)**:
-adapt Laya to the difficulty task, then improve it with more reviewed examples.
+This supplementary experiment adapts Laya to human difficulty categories, then
+adds training examples. The [main walkthrough](../README.md) instead learns
+when the stronger solver improves the final answer; use its benefit-trained
+weights and cutoffs for the savings comparison.
 The model starts from the pinned pretrained Laya checkpoint and learns rank-16
 attention adapters together with its native decision head.
 
@@ -9,15 +11,15 @@ With the same recipe, mean accuracy improves from **57.34% to 65.00%**, or
 **17.9% fewer errors**, as training grows from 512 to 2,581 examples. All three
 declared seeds improve; the paired 95% interval for the gain is **+3.20 to
 +12.04 percentage points**. These are results on the same published 479-problem
-regression benchmark. The next stage of the walkthrough changes to Qwen4B plus
-a ridge classifier, reaching **72.03%** with 512 training examples. See
+regression benchmark. The corresponding Qwen4B plus ridge classifier reaches
+**72.03%** difficulty accuracy with 512 training examples. See
 [results](results.md) for every seed and the limits of these comparisons.
 
 Run commands from `examples/train-a-router`. This guide trains both sizes,
 evaluates their frozen checkpoints, and serves a trained router. Training uses
 your GPU; SIE Cloud credits cover embedding inference. Use new output directories
-for each training run. If you completed the main walkthrough, reuse its inputs
-and outputs and skip the preparation and training commands you already ran.
+for each training run. These are different training inputs and targets from
+the benefit experiment; keep their output folders separate.
 
 ## Choose the training device
 

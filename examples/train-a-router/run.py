@@ -1,4 +1,8 @@
-"""Download, learn, evaluate and use a difficulty router in one environment."""
+"""Fetch routing evidence and replay the earlier difficulty-label experiments.
+
+Use benefit_replay.py for the answer-quality and savings training walkthrough,
+and benefit_route.py to answer a new question with a benefit router.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +32,15 @@ def main():
                 action="store_true",
                 help="Fetch the LoRA training study; defaults to --evidence run-output/lora-study",
             )
+            child.add_argument("--solver-study", action="store_true", help="Fetch paired solver quality/cost evidence")
+            child.add_argument(
+                "--solver-records", action="store_true", help="Also download raw answers and individual charge receipts"
+            )
+            child.add_argument(
+                "--solver-weights",
+                action="store_true",
+                help="Also download native benefit-router weights for local use",
+            )
         elif command == "collect":
             child.add_argument("--split", choices=("development", "test"), required=True)
             child.add_argument("--output", type=Path, required=True)
@@ -49,8 +62,22 @@ def main():
     if args.command == "fetch":
         if args.lora_study and args.weights not in (None, "lora"):
             parser.error("--lora-study supports only --weights lora")
-        directory = args.evidence or Path("run-output/lora-study" if args.lora_study else "evidence")
-        evidence.fetch(directory, args.weights, lora_study=args.lora_study)
+        default = (
+            "run-output/solver-study"
+            if args.solver_study
+            else "run-output/lora-study"
+            if args.lora_study
+            else "evidence"
+        )
+        directory = args.evidence or Path(default)
+        evidence.fetch(
+            directory,
+            args.weights,
+            lora_study=args.lora_study,
+            solver_study=args.solver_study,
+            solver_records=args.solver_records,
+            solver_weights=args.solver_weights,
+        )
         return
     if args.command == "route":
         policy = json.loads(args.policy.read_text())

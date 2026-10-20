@@ -14,6 +14,8 @@ sie-sdk = { git = "https://github.com/superlinked/sie", rev = "d680237f02c2b67fd
 [dependency-groups]
 data = ["pyarrow>=18,<24"]
 dev = ["ruff>=0.14"]
+evaluation = ["pyarrow>=18,<24", "math-verify[antlr4_13_2]==0.9.0"]
+outcomes = ["scipy==1.17.0"]
 training = ["laya==0.3.29", "peft==0.18.1", "torch==2.9.1", "transformers==4.57.6"]
 plots = [
     "matplotlib>=3.10,<4",

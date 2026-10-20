@@ -117,12 +117,59 @@ class EvidenceTests(unittest.TestCase):
             (["fetch"], Path("evidence"), False),
             (["fetch", "--lora-study"], Path("run-output/lora-study"), True),
             (["fetch", "--lora-study", "--evidence", "custom-followup"], Path("custom-followup"), True),
+            (["fetch", "--solver-study"], Path("run-output/solver-study"), False),
+            (["fetch", "--solver-study", "--solver-records"], Path("run-output/solver-study"), False),
+            (["fetch", "--solver-study", "--solver-weights"], Path("run-output/solver-study"), False),
         )
         for arguments, directory, followup in cases:
-            with self.subTest(arguments=arguments), patch("sys.argv", ["run.py", *arguments]):
-                with patch.object(evidence, "fetch") as fetch:
-                    run.main()
-                fetch.assert_called_once_with(directory, None, lora_study=followup)
+            with (
+                self.subTest(arguments=arguments),
+                patch("sys.argv", ["run.py", *arguments]),
+                patch.object(evidence, "fetch") as fetch,
+            ):
+                run.main()
+                fetch.assert_called_once_with(
+                    directory,
+                    None,
+                    lora_study=followup,
+                    solver_study="--solver-study" in arguments,
+                    solver_records="--solver-records" in arguments,
+                    solver_weights="--solver-weights" in arguments,
+                )
+
+    def test_solver_replay_downloads_weights_and_raw_answers_only_when_requested(self):
+        artifacts = {
+            "benefit/head/report.json": ("core", b"{}"),
+            "benefit/native/lora/model.safetensors": ("native-weights", b"weights"),
+            "training-records.tar.gz": ("answers", b"raw records"),
+        }
+        body, digest = manifest(artifacts)
+        base = f"{evidence.BASE_URL}solver-revision/{evidence.SOLVER_FOLDER}/"
+
+        def open_url(url, **kwargs):
+            self.assertTrue(url.startswith(base))
+            name = url.removeprefix(base)
+            return io.BytesIO(body if name == "manifest.json" else artifacts[name][1])
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(evidence, "SOLVER_REVISION", "solver-revision"),
+            patch.object(evidence, "SOLVER_MANIFEST_SHA256", digest),
+            patch.object(evidence.urllib.request, "urlopen", side_effect=open_url),
+        ):
+            directory = Path(temporary)
+            evidence.fetch(directory, solver_study=True)
+            self.assertFalse((directory / "benefit/native/lora/model.safetensors").exists())
+            self.assertFalse((directory / "training-records.tar.gz").exists())
+            evidence.fetch(directory, solver_study=True, solver_weights=True)
+            self.assertTrue((directory / "benefit/native/lora/model.safetensors").exists())
+            self.assertFalse((directory / "training-records.tar.gz").exists())
+            evidence.fetch(directory, solver_study=True, solver_records=True)
+            self.assertTrue((directory / "training-records.tar.gz").exists())
+        with patch.object(evidence.urllib.request, "urlopen") as download:
+            with self.assertRaisesRegex(ValueError, "requires --solver-study"):
+                evidence.fetch(Path("unused"), solver_weights=True)
+            download.assert_not_called()
 
 
 if __name__ == "__main__":
