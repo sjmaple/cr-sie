@@ -495,7 +495,8 @@ def test_a_graph_over_a_cached_prefix_scores_as_the_eager_forward() -> None:
     assert graphed._prefix_graphs == {}
     assert graphed._graph_tokens == 128
     question = Item(text="is this message spam")
-    closing = len(graphed._chat_suffix_ids)  # a tail is the document and the template's closing tokens
+    # A tail is the space after "<Document>:", the document and the template's closing tokens.
+    closing = len(graphed._document_separator_ids) + len(graphed._chat_suffix_ids)
     # Tails of 60 and 64 tokens (one graph), 100 and 128 (another), and 129, which is past the graphs.
     docs = [Item(text="d" * (n - closing)) for n in (60, 100, 64, 128, 129)]
 
