@@ -309,8 +309,18 @@ class TestEnsureModelReady:
         reg.start_load_async = AsyncMock(return_value=True)
         ex = QueueExecutor(reg)
         assert await ex.ensure_model_ready("test/model") == "ready"
-        reg.wake_parked.assert_awaited_once_with("test/model", "cpu")
+        reg.wake_parked.assert_awaited_once_with("test/model", "cpu", timeout_s=15.0)
         reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parked_wake_wait_stays_inside_the_readiness_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SIE_MODEL_READY_TIMEOUT_S", "8")
+        reg = _make_registry(loaded=False, loading=False)
+        reg.is_parked.return_value = True
+        reg.wake_parked = AsyncMock(return_value=True)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "ready"
+        reg.wake_parked.assert_awaited_once_with("test/model", "cpu", timeout_s=4.0)
 
     @pytest.mark.asyncio
     async def test_parked_model_still_waking_reports_loading(self) -> None:

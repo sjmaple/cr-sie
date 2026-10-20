@@ -94,7 +94,7 @@ _PARKABLE_EVICTIONS = frozenset(
 # How long a request waits for a parked model to wake before it is told to
 # retry. A wake normally takes seconds; this bounds the wait when the wake
 # queues behind another model's cold load.
-_HOST_WAKE_WAIT_S = 15.0
+HOST_WAKE_WAIT_S = 15.0
 
 
 class _ConfigChangedDuringLoadError(RuntimeError):
@@ -2104,7 +2104,7 @@ class ModelRegistry:
             retained = await self._run_adapter_call(adapter.restore_from_host, name, "Wake")
         return released_bytes(retained)
 
-    async def wake_parked(self, name: str, device: str, *, timeout_s: float = _HOST_WAKE_WAIT_S) -> bool:
+    async def wake_parked(self, name: str, device: str, *, timeout_s: float = HOST_WAKE_WAIT_S) -> bool:
         """Start waking a parked model and wait up to ``timeout_s`` for it.
 
         For request paths that would otherwise answer "loading, retry": a

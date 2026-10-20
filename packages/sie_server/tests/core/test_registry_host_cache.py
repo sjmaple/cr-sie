@@ -19,6 +19,7 @@ from sie_server.config.engine import EngineConfig
 from sie_server.core import registry as registry_module
 from sie_server.core.loader import load_model_configs
 from sie_server.core.memory import SIE_FAKE_MEMORY_BUDGET_ENV
+from sie_server.core.model_loader import LoadedLora
 from sie_server.core.registry import ModelRegistry
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -295,3 +296,21 @@ async def test_cancelled_wake_before_restore_keeps_the_parked_copy(monkeypatch: 
     assert SMALL_A in registry.parked_model_names
     assert registry.host_cache.retained_bytes(SMALL_A) == 0
     assert registry.host_cache.used_bytes == 128 * MIB
+
+
+async def test_wake_drops_lora_placeholders_left_by_the_park(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = _registry(monkeypatch)
+    await registry.load_async(SMALL_A, device="cpu")
+    await registry.load_async(SMALL_B, device="cpu")
+    await registry.load_async(BIG, device="cpu")
+
+    parked = registry.host_cache.get(SMALL_A)
+    assert parked is not None
+    parked.loaded.loras["in-flight"] = LoadedLora(adapter_id="in-flight", loading=True)
+    parked.loaded.loras["victim"] = LoadedLora(adapter_id="victim", unloading=True)
+    parked.loaded.loras["resident"] = LoadedLora(adapter_id="resident")
+
+    await registry.load_async(SMALL_A, device="cpu")
+    loras = registry._loaded[SMALL_A].loras
+    assert list(loras) == ["victim", "resident"]
+    assert not loras["victim"].unloading

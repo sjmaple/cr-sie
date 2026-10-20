@@ -142,6 +142,17 @@ def _collect(adapter: object, device: torch.device) -> _Reach:
     return reach
 
 
+def _view_key(tensor: torch.Tensor) -> tuple[Any, ...]:
+    """Identity of a tensor view: two tensor objects with one key alias the same bytes."""
+    return (
+        tensor.untyped_storage().data_ptr(),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+    )
+
+
 def _module_tensors(module: torch.nn.Module) -> list[torch.Tensor]:
     tensors: list[torch.Tensor] = []
     for submodule in module.modules():
@@ -156,7 +167,8 @@ def parkable_bytes(adapter: object, device: torch.device) -> int | None:
     reach = _collect(adapter, device)
     if reach.unmovable_bytes:
         return None
-    storages: dict[int, int] = {}
+    # Counted per view, as ``park`` copies them: aliases of one view once.
+    views: dict[tuple[Any, ...], int] = {}
     for module in reach.modules:
         for submodule in module.modules():
             if getattr(submodule, "_hf_hook", None) is not None:
@@ -165,12 +177,10 @@ def parkable_bytes(adapter: object, device: torch.device) -> int | None:
             if type(tensor) not in (torch.Tensor, torch.nn.Parameter):
                 return None
             if _on(device, tensor):
-                storage = tensor.untyped_storage()
-                storages[storage.data_ptr()] = storage.nbytes()
+                views[_view_key(tensor)] = tensor.nbytes
     for _, tensor in reach.loose:
-        storage = tensor.untyped_storage()
-        storages[storage.data_ptr()] = storage.nbytes()
-    total = sum(storages.values())
+        views[_view_key(tensor)] = tensor.nbytes
+    total = sum(views.values())
     return total or None
 
 
@@ -179,16 +189,25 @@ def park(adapter: object, device: torch.device) -> ParkedTensors:
     reach = _collect(adapter, device)
     origins: dict[int, torch.device] = {}
     copies: list[torch.Tensor] = []
+    # Device views already copied. A second tensor object over the same view
+    # (``self.original_inv_freq = self.inv_freq``, a loose ``weight.data``)
+    # gets the same host copy, so the bytes are copied and charged once and
+    # the aliasing survives the wake.
+    moved: dict[tuple[Any, ...], torch.Tensor] = {}
 
     def to_host(tensor: torch.Tensor) -> torch.Tensor:
-        copy = tensor.detach().to("cpu", copy=True)
-        origins[copy.untyped_storage().data_ptr()] = tensor.device
-        copies.append(copy)
+        key = _view_key(tensor)
+        copy = moved.get(key)
+        if copy is None:
+            copy = tensor.detach().to("cpu", copy=True)
+            origins[copy.untyped_storage().data_ptr()] = tensor.device
+            copies.append(copy)
+            moved[key] = copy
         return copy
 
     def still_on_device(tensor: torch.Tensor) -> bool:
-        # A parameter shared by two modules, or a loose reference to one,
-        # has already been moved once by the time it is seen again.
+        # A parameter shared by two modules, or a loose reference to one, has
+        # already been rebound to its host copy by the time it is seen again.
         return _on(device, tensor) and tensor.untyped_storage().data_ptr() not in origins
 
     with torch.no_grad():
@@ -211,8 +230,14 @@ def unpark(parked: ParkedTensors) -> None:
         storage = tensor.untyped_storage()
         return tensor.device.type == "cpu" and storage.nbytes() > 0 and storage.data_ptr() in parked.origins
 
+    # One device tensor per host copy, so aliases stay aliases.
+    restored: dict[int, torch.Tensor] = {}
+
     def to_device(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.to(parked.origins[tensor.untyped_storage().data_ptr()], copy=True)
+        ptr = tensor.untyped_storage().data_ptr()
+        if ptr not in restored:
+            restored[ptr] = tensor.to(parked.origins[ptr], copy=True)
+        return restored[ptr]
 
     with torch.no_grad():
         for module in parked.modules:

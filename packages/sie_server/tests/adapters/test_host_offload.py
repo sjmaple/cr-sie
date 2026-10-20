@@ -228,3 +228,19 @@ def test_weights_the_walk_cannot_reach_block_parking(monkeypatch: pytest.MonkeyP
     # The adapter reports more weights than the walk found.
     monkeypatch.setattr(adapter, "memory_footprint", lambda: reachable * 2)
     assert adapter.host_offload_bytes() is None
+
+
+def test_aliases_of_one_tensor_are_copied_once_and_stay_aliases() -> None:
+    holder = _Holder()
+    holder.model.original_scale = holder.model.scale  # a plain-attribute alias of a buffer
+    holder.weight_alias = holder.model.embed.weight.data  # a loose alias of a parameter's data
+
+    expected = _host_offload.parkable_bytes(holder, CPU)
+    parked = _host_offload.park(holder, CPU)
+    assert parked.nbytes == expected
+    assert _ptr(holder.model.original_scale) == _ptr(holder.model.scale)
+    assert _ptr(holder.weight_alias) == _ptr(holder.model.embed.weight)
+
+    _host_offload.unpark(parked)
+    assert _ptr(holder.model.original_scale) == _ptr(holder.model.scale)
+    assert _ptr(holder.weight_alias) == _ptr(holder.model.embed.weight)

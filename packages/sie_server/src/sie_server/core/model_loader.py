@@ -755,7 +755,14 @@ class ModelLoader:
         )
 
         if restore_from is not None:
-            loaded_model.loras = restore_from.loras
+            # A LoRA load still in flight when the model parked saw it leave
+            # the registry and gave up without clearing its placeholder, and a
+            # LoRA marked for eviction whose unload never ran is still attached.
+            for source, state in restore_from.loras.items():
+                if state.loading:
+                    continue
+                state.unloading = False
+                loaded_model.loras[source] = state
             loaded_model.max_loras = restore_from.max_loras
             loaded_model.lora_failures = restore_from.lora_failures
             loaded_model.lora_runtime = restore_from.lora_runtime
