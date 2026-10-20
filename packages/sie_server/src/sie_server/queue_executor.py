@@ -880,6 +880,11 @@ class QueueExecutor:
         if failure is not None and failure.is_permanent:
             return "failed"
 
+        # A model parked in host RAM wakes in seconds: wait for it so the
+        # dispatcher can run this work now instead of re-polling.
+        if self._registry.is_parked(model_id) and await self._registry.wake_parked(model_id, self._registry.device):
+            return "ready"
+
         if self._registry.is_loading(model_id):
             return "loading_in_progress"
 

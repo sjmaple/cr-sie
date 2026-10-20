@@ -636,12 +636,24 @@ class ModelLoader:
             raise
         return self._finish_load(name, device, adapter, config)
 
+    def register_woken(self, name: str, parked: LoadedModel) -> LoadedModel:
+        """Register an adapter restored from the host-RAM tier.
+
+        The adapter kept its weights and LoRA adapters while parked, so its
+        LoRA bookkeeping carries over and nothing is preloaded again. Only the
+        worker (stopped when the model parked) and the pre/postprocessor
+        registrations are rebuilt.
+        """
+        return self._finish_load(name, parked.device, parked.adapter, parked.config, restore_from=parked)
+
     def _finish_load(
         self,
         name: str,
         device: str,
         adapter: ModelAdapter,
         config: ModelConfig,
+        *,
+        restore_from: LoadedModel | None = None,
     ) -> LoadedModel:
         """Complete loading - register preprocessor, create worker.
 
@@ -650,6 +662,8 @@ class ModelLoader:
             device: Device string.
             adapter: The loaded adapter.
             config: Model configuration.
+            restore_from: The parked ``LoadedModel`` when the adapter woke from
+                the host tier; its LoRA state is kept instead of preloaded.
 
         Returns:
             LoadedModel containing the loaded state.
@@ -739,6 +753,14 @@ class ModelLoader:
             memory_bytes=memory_bytes,
             max_loras=self._max_loras_per_model,
         )
+
+        if restore_from is not None:
+            loaded_model.loras = restore_from.loras
+            loaded_model.max_loras = restore_from.max_loras
+            loaded_model.lora_failures = restore_from.lora_failures
+            loaded_model.lora_runtime = restore_from.lora_runtime
+            logger.info("Model '%s' restored from host RAM", name)
+            return loaded_model
 
         # Engine-owned runtimes report their startup residency. Ordinary
         # PEFT adapters use the existing preload path below.

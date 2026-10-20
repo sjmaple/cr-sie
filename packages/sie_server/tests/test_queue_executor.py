@@ -152,6 +152,8 @@ def _make_registry(*, loaded: bool = True, loading: bool = False) -> MagicMock:
     # which ``ensure_model_ready`` now reads to gate the terminal ``failed``
     # state (#1786 fast-path). Tests that want the terminal path set this.
     reg.get_failure.return_value = None
+    # Nothing parked in the host-RAM tier unless a test parks it.
+    reg.is_parked.return_value = False
     return reg
 
 
@@ -298,6 +300,25 @@ class TestEnsureModelReady:
         ex = QueueExecutor(reg)
         assert await ex.ensure_model_ready("test/model") == "loading_in_progress"
         reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parked_model_is_woken_and_ready(self) -> None:
+        reg = _make_registry(loaded=False, loading=False)
+        reg.is_parked.return_value = True
+        reg.wake_parked = AsyncMock(return_value=True)
+        reg.start_load_async = AsyncMock(return_value=True)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "ready"
+        reg.wake_parked.assert_awaited_once_with("test/model", "cpu")
+        reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parked_model_still_waking_reports_loading(self) -> None:
+        reg = _make_registry(loaded=False, loading=True)
+        reg.is_parked.return_value = True
+        reg.wake_parked = AsyncMock(return_value=False)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "loading_in_progress"
 
     @pytest.mark.asyncio
     async def test_triggers_new_load(self) -> None:
