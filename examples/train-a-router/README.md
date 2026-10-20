@@ -22,7 +22,7 @@ new requests. Follow these steps, or use the [one-page quickstart](QUICKSTART.md
 
 1. **Measure the opportunity:** compare always using the stronger model with
    always using the cheaper one [always-strong savings **0%**; quality gap **0 points**].
-2. **Try Laya without adaptation:** establish what a compact decision model can
+2. **Inspect unchanged Laya:** establish what a compact decision model can
    do before learning this workload [savings **21.6% before hosting**; gap **1.50 points**].
 3. **Adapt Laya with LoRA:** preserve more correct answers by learning from the
    two answer models' outcomes [savings **16.4% before hosting**; gap **0.80 points**].
@@ -37,6 +37,8 @@ Steps 1–4 compare routing methods. Step 5 is an alternative source of training
 labels; step 6 turns the chosen method into a working application. LoRA's first
 benefit is better answer quality. The embedding approach then improves both
 measured quality and cost, at the expense of using a larger encoder.
+Both training stages compare 500 with 2,000 examples, showing how retraining
+with more observed answer outcomes changes the tradeoff.
 
 All code is in this folder. The example's [Hugging Face download](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/71e0d5109e46f8b9c698806e7d3e47b2aa0da87d/evaluations/2026-10-19/train-a-router-arithmetic) contains the
 questions, answer keys, recorded predictions, embeddings, and optional model
@@ -198,8 +200,8 @@ Open `run-output/replay/comparison.md`. Always using 27B answers **95.90%** corr
 10,000 questions**. Always using 4B costs **$2.29**, but accuracy falls to
 **91.03%**: a **4.87-point gap**, or about 487 fewer correct answers per
 10,000. At its saved secondary setting, the final embedding router reduces
-that loss to about **83 answers**: it recovers roughly **404 of the 487**,
-while costing **$3.21 less per 10,000** than always using 27B.
+that loss to about **83 answers**, while costing **$3.21 less per 10,000**
+than always using 27B.
 
 Every router chooses between the same two recorded answers for each question.
 That isolates the effect of its routing choices from variation in newly
@@ -208,7 +210,7 @@ further experiments need new test questions.
 
 <a id="laya"></a>
 
-## 2. Use Laya [savings **21.6% before hosting**; quality gap **1.50 points**]
+## 2. Inspect unchanged Laya [savings **21.6% before hosting**; quality gap **1.50 points**]
 
 **Purpose:** try a small model designed for decisions before adapting it to the
 successes and failures of these two answer models.
@@ -222,6 +224,9 @@ model weights stay fixed. Training records supply expected answer costs, and
 calibration chooses the cutoff. The baseline uses the same cost estimates as
 the corresponding LoRA run. This keeps the cost assumptions matched when
 comparing the unchanged and trained routers; each has its own chosen cutoff.
+
+**Your task:** use the replayed report to record this baseline's cost and
+quality gap, then compare the gap with the one-point goal.
 
 The unchanged decision model saves **21.6% before hosting**, but its
 **1.50-point** test gap exceeds the one-point calibration target. It
@@ -501,3 +506,10 @@ decisions, teacher comparison, cost estimates, and uncertainty intervals.
 Your final result is a trained router, a successful routed request, and a
 short explanation of your chosen setting: its measured savings, quality gap,
 router overhead, and serving requirements.
+
+**Optional transfer case study:** [Use the same decisions with Sol and
+Luna](docs/model-pair-transfer.md). Without retraining, the embedding router
+saves **29.8% with a 0.27-point gap** at the original primary setting and
+**46.2% with a 0.43-point gap** at the original secondary setting. The case study
+compares unchanged Laya, LoRA, embeddings, and always using the cheaper model.
+It reuses the same questions and supports CPU replay without another API account.

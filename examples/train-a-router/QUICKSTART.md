@@ -15,7 +15,7 @@ interval is 0.33–1.30 points; results on other workloads can differ.
 | Step | What you learn | Savings / quality gap |
 | --- | --- | --- |
 | [1. Baselines](README.md#baseline) | Compare always-strong with always-cheap to see the opportunity. | **0% / 0 points** for always-strong |
-| [2. Laya](README.md#laya) | Try a compact decision model before adaptation. | **21.6% / 1.50 points** |
+| [2. Laya baseline](README.md#laya) | Compare its replayed cost and quality gap with your goal. | **21.6% / 1.50 points** |
 | [3. LoRA](README.md#lora) | Learn from answer outcomes to preserve more quality. | **16.4% / 0.80 points** |
 | [4. Embeddings](README.md#embedding-router) | Improve measured cost and quality with small classifiers trained on CPU. | **20.9% / 0.47 points** |
 | [5. Without training answer keys](README.md#teacher-labels) | Use a teacher; compare label sources on 1,539 matched questions. | **19.7% / 0.33 points** |
@@ -59,12 +59,19 @@ Commands default to `--study evidence --population expanded` (2,000 examples).
 Use `--population original` on fit and evaluate for 500 examples.
 
 ```sh
-# Stages 4–5: train from saved embeddings and teacher references, then evaluate both.
+# Stage 4: train classifiers from saved embeddings and evaluate the routing rule.
 uv run --frozen --group outcomes python router.py fit-embedding --run run-output/my-router
+uv run --frozen --group outcomes python router.py evaluate --run run-output/my-router --method embedding --output run-output/embedding.json
+```
+
+Stage 5 explores the alternative when training answer keys are missing.
+It reuses recorded teacher references and compares them with reference labels
+on the same questions. If using your reference-label router, continue to stage 6.
+
+```sh
+# Stage 5: compare teacher-generated training labels with the matched reference-label control.
 uv run --frozen --group outcomes python router.py fit-teacher --run run-output/my-router
-for method in embedding teacher; do
-  uv run --frozen --group outcomes python router.py evaluate --run run-output/my-router --method "$method" --output "run-output/$method.json"
-done
+uv run --frozen --group outcomes python router.py evaluate --run run-output/my-router --method teacher --output run-output/teacher.json
 ```
 
 For stage 6, choose the primary `--target 1` (**$7.52 per 10,000 questions**, about
@@ -85,3 +92,6 @@ uses the same SDK against your own GPU server.
 
 Finish with a saved router, your chosen cost/quality setting, and a receipt
 showing which answer model was selected and what the new request cost.
+
+Optional: [replay the same routing decisions with Sol and Luna](docs/model-pair-transfer.md)
+to see how another answer-model pair changes the cost/quality tradeoff.
