@@ -1,120 +1,141 @@
-"""Download and verify the immutable public experiment; weights are opt-in."""
+"""Download the example's public artifacts and verify their published hashes."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
-import urllib.request
 from pathlib import Path, PurePosixPath
+import re
+import tempfile
+from urllib.parse import quote, urljoin, urlsplit
+from urllib.request import urlopen
 
-from data import file_hash
-
-REVISION = "4136e68feaa90b5f50dce9f30df212982d393356"
-MANIFEST_SHA256 = "6fa7b8e94d5894177cf702f00df9daacabcdc8bbab237eac3f0a15eb28c3e709"
-FOLDER = "evaluations/2026-10-18/train-a-router-grouped-v2"
-LORA_REVISION = "d884d137386ccc4c89eb6d78449197a4e4be9892"
-LORA_MANIFEST_SHA256 = "f9f2f521de0dc6bc1711e7695378702efc03a55f017d29b7e52dc6552ae5872f"
-LORA_FOLDER = "evaluations/2026-10-18/train-a-router-lora-followup"
-SOLVER_REVISION = "7810c9631d8fca236ea8a074bab86b25f2b3fa0e"
-SOLVER_MANIFEST_SHA256 = "9df32300204ac4f24ffcd032c824619ddf9d0db100179d8d947397d191db6a59"
-SOLVER_FOLDER = "evaluations/2026-10-19/train-a-router-answer-quality"
-ARITHMETIC_REVISION = "71e0d5109e46f8b9c698806e7d3e47b2aa0da87d"
-ARITHMETIC_MANIFEST_SHA256 = "45e0d829c043cb9aaec2ab77859a93a34fda0a3e8765ca89ca81d6e0461d725d"
-ARITHMETIC_FOLDER = "evaluations/2026-10-19/train-a-router-arithmetic"
-BASE_URL = "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/"
+FORMAT = "train-a-router-artifacts-v1"
+GROUPS = frozenset({"core", "weights", "recordings"})
+MANIFEST_LIMIT = 2 * 1024 * 1024
 
 
-def entries(body, *, manifest_sha256=None):
-    if hashlib.sha256(body).hexdigest() != (manifest_sha256 or MANIFEST_SHA256):
-        raise ValueError("Manifest differs from the pinned public experiment")
+def sha(path):
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def checked_manifest(body, expected_sha256):
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("Supply the 64-character SHA-256 published with the artifact manifest")
+    if len(body) > MANIFEST_LIMIT or hashlib.sha256(body).hexdigest() != expected_sha256:
+        raise ValueError("The downloaded manifest does not match the published SHA-256")
     manifest = json.loads(body)
-    for name, item in manifest["files"].items():
+    if manifest.get("format") != FORMAT or not isinstance(manifest.get("files"), list) or not manifest["files"]:
+        raise ValueError("Unknown or empty artifact manifest")
+    names = set()
+    for entry in manifest["files"]:
+        name = entry.get("path")
+        if not isinstance(name, str) or not name or "\\" in name:
+            raise ValueError("Artifact paths must be relative POSIX paths")
         path = PurePosixPath(name)
-        if path.is_absolute() or ".." in path.parts or "\\" in name or str(path) != name:
-            raise ValueError("Unsafe artifact path")
-        if not isinstance(item["bytes"], int) or not 0 <= item["bytes"] <= 2_000_000_000:
-            raise ValueError("Invalid artifact size")
-    return manifest["files"]
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != name or name in (".", "manifest.json"):
+            raise ValueError("Artifact path can escape or overwrite the manifest")
+        if name in names or any(parent.as_posix() in names for parent in path.parents):
+            raise ValueError("Duplicate or conflicting artifact path")
+        if any(PurePosixPath(other).is_relative_to(path) for other in names):
+            raise ValueError("Artifact path conflicts with an earlier directory")
+        names.add(name)
+        if (
+            entry.get("group") not in GROUPS
+            or type(entry.get("size")) is not int
+            or entry["size"] < 0
+            or not isinstance(entry.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+        ):
+            raise ValueError("Artifact is missing its group, byte count, or SHA-256")
+    return manifest
 
 
-def verify_file(path, expected):
-    if path.stat().st_size != expected["bytes"] or file_hash(path) != expected["sha256"]:
-        raise ValueError(f"Artifact hash/size differs: {path.name}")
+def artifact_path(root, relative):
+    root = Path(root).resolve()
+    target = root / relative
+    if target.is_symlink() or not target.resolve().is_relative_to(root):
+        raise ValueError("Artifact destination escapes the download directory through a symlink")
+    return target
 
 
-def verify(directory, *, manifest_sha256=None):
-    files = entries((directory / "manifest.json").read_bytes(), manifest_sha256=manifest_sha256)
-    for name, expected in files.items():
-        if expected["group"] == "core":
-            verify_file(directory / name, expected)
-    return files
-
-
-def fetch(
-    directory, weights=None, *, lora_study=False, solver_study=False, arithmetic_study=False,
-    solver_records=False, solver_weights=False,
-):
-    if sum((lora_study, solver_study, arithmetic_study)) > 1:
-        raise ValueError("Choose one study")
-    answer_study = solver_study or arithmetic_study
-    if answer_study and weights:
-        raise ValueError("Choose one study; solver evidence contains no router weights")
-    if solver_records and not answer_study:
-        raise ValueError("--solver-records requires --solver-study")
-    if solver_weights and not answer_study:
-        raise ValueError("--solver-weights requires --solver-study")
-    if lora_study and weights not in (None, "lora"):
-        raise ValueError("The LoRA follow-up supports only --weights lora")
-    revision = LORA_REVISION if lora_study else REVISION
-    folder = LORA_FOLDER if lora_study else FOLDER
-    manifest_sha256 = LORA_MANIFEST_SHA256 if lora_study else MANIFEST_SHA256
-    if solver_study:
-        revision, folder, manifest_sha256 = SOLVER_REVISION, SOLVER_FOLDER, SOLVER_MANIFEST_SHA256
-    if arithmetic_study:
-        revision, folder, manifest_sha256 = ARITHMETIC_REVISION, ARITHMETIC_FOLDER, ARITHMETIC_MANIFEST_SHA256
-    if "PENDING_PUBLICATION" in (revision, manifest_sha256):
-        raise RuntimeError("Public evidence has not been pinned yet")
-    destination = directory / "manifest.json"
-    if destination.exists() and file_hash(destination) != manifest_sha256:
-        raise ValueError("Destination contains a different experiment")
-    base = f"{BASE_URL}{revision}/{folder}/"
-    with urllib.request.urlopen(base + "manifest.json", timeout=60) as response:
-        body = response.read(2_000_001 if answer_study else 200_001)
-    files = entries(body, manifest_sha256=manifest_sha256)
-    directory.mkdir(parents=True, exist_ok=True)
-    groups = {"core"}
-    if solver_records:
-        groups.add("answers")
-    if solver_weights:
-        groups.add("native-weights")
-    if weights:
-        groups.update(f"seed89-{v}" for v in (("full", "lora") if weights == "both" else (weights,)))
-    for name, expected in files.items():
-        if expected["group"] not in groups:
+def verify(directory, *, manifest_sha256, groups=("core",)):
+    directory = Path(directory)
+    if not groups or not set(groups).issubset(GROUPS):
+        raise ValueError("Choose core, weights, or recordings artifact groups")
+    manifest = checked_manifest((directory / "manifest.json").read_bytes(), manifest_sha256)
+    for entry in manifest["files"]:
+        if entry["group"] not in groups:
             continue
-        path = directory / name
-        if path.exists():
-            verify_file(path, expected)
+        path = artifact_path(directory, entry["path"])
+        if not path.is_file() or path.stat().st_size != entry["size"] or sha(path) != entry["sha256"]:
+            raise ValueError(f"Missing or changed artifact: {entry['path']}; repeat fetch to repair the download")
+    return manifest
+
+
+def download(url, target, entry):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=target.name + ".", suffix=".partial", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            received, digest = 0, hashlib.sha256()
+            with urlopen(url, timeout=120) as response:
+                while chunk := response.read(1024 * 1024):
+                    received += len(chunk)
+                    if received > entry["size"]:
+                        raise ValueError("Artifact is larger than its published byte count")
+                    digest.update(chunk)
+                    stream.write(chunk)
+        if received != entry["size"] or digest.hexdigest() != entry["sha256"]:
+            raise ValueError(f"Downloaded artifact failed verification: {entry['path']}")
+        temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def fetch(manifest_url, manifest_sha256, output, groups=("core",)):
+    """Reuse verified downloads; optional weights are unnecessary for CPU replay."""
+    if not groups or not set(groups).issubset(GROUPS):
+        raise ValueError("Choose core, weights, or recordings artifact groups")
+    url = urlsplit(manifest_url)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ValueError("Use the public HTTPS manifest URL without credentials, query parameters, or fragments")
+    with urlopen(manifest_url, timeout=60) as response:
+        body = response.read(MANIFEST_LIMIT + 1)
+    manifest = checked_manifest(body, manifest_sha256)
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / "manifest.json"
+    if manifest_path.is_symlink():
+        raise ValueError("The manifest destination must not be a symlink")
+    if manifest_path.exists():
+        if manifest_path.read_bytes() != body:
+            raise ValueError("This directory contains another study; choose a new output directory")
+    else:
+        if any(output.iterdir()):
+            raise ValueError("Use an empty directory for the first download")
+        manifest_path.write_bytes(body)
+    downloaded, reused, total = 0, 0, 0
+    for entry in manifest["files"]:
+        if entry["group"] not in groups:
             continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".download-", delete=False) as handle:
-            temporary = Path(handle.name)
-            try:
-                with urllib.request.urlopen(base + name, timeout=300) as response:
-                    size = 0
-                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
-                        size += len(chunk)
-                        if size > expected["bytes"]:
-                            raise ValueError("Artifact exceeds its declared size")
-                        handle.write(chunk)
-                handle.flush()
-                verify_file(temporary, expected)
-                temporary.replace(path)
-            finally:
-                temporary.unlink(missing_ok=True)
-        print(f"Verified {name}", flush=True)
-    if destination.exists() and destination.read_bytes() != body:
-        raise ValueError("Destination contains a different experiment")
-    destination.write_bytes(body)
-    verify(directory, manifest_sha256=manifest_sha256)
+        target = artifact_path(output, entry["path"])
+        total += entry["size"]
+        if target.is_file() and target.stat().st_size == entry["size"] and sha(target) == entry["sha256"]:
+            reused += 1
+            continue
+        download(urljoin(manifest_url, quote(entry["path"], safe="/")), target, entry)
+        downloaded += 1
+    return {
+        "directory": str(output),
+        "manifest_sha256": manifest_sha256,
+        "downloaded_files": downloaded,
+        "reused_files": reused,
+        "selected_bytes": total,
+        "groups": list(groups),
+    }

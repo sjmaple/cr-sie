@@ -1,26 +1,26 @@
 [project]
-name = "sie-train-a-router-example"
+name = "train-a-router-paired-example"
 version = "0.1.0"
-description = "Learn, validate and serve a request router with frozen embeddings or a fine-tuned decision model"
+description = "Learn a two-model router from paired correctness and measured costs"
 requires-python = ">=3.12,<3.13"
-dependencies = ["numpy==2.4.6", "sie-sdk==0.10.0", "httpx>=0.28,<1"]
+dependencies = ["numpy==2.4.6"]
 
 [tool.uv]
 package = false
 
 [tool.uv.sources]
-sie-sdk = { git = "https://github.com/superlinked/sie", rev = "d680237f02c2b67fd9afd91f30b73a29cb18fae0", subdirectory = "packages/sie_sdk" }
+sie-sdk = { git = "https://github.com/superlinked/sie", rev = "975d5309ba3af9eaeb13725b20dcf10d906c3e2a", subdirectory = "packages/sie_sdk" }
 
 [dependency-groups]
-data = ["pyarrow>=18,<24"]
-dev = ["ruff>=0.14"]
-evaluation = ["pyarrow>=18,<24", "math-verify[antlr4_13_2]==0.9.0"]
-outcomes = ["scipy==1.17.0"]
+outcomes = ["scipy==1.17.0", "scikit-learn==1.6.1"]
+live = ["sie-sdk==0.10.1", "httpx==0.28.1"]
 training = ["laya==0.3.29", "peft==0.18.1", "torch==2.9.1", "transformers==4.57.6"]
-plots = [
-    "matplotlib>=3.10,<4",
-]
+dev = ["ruff>=0.14"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# Preserve the exact original scheduler bytes bound by the public acquisition receipts.
+"_collection/openai_population.py" = ["F401"]

@@ -1,98 +1,111 @@
-# Serve the three models on your own GPUs
+# Serve the Qwen encoder on your own GPU
 
-This recipe exposes one local SIE endpoint for the encoder and both answer
-models. The routing commands use the same prompts, model revisions and
-conditional final-answer calls as SIE Cloud.
+This folder starts **one SIE embedding server** for the router. The two small
+correctness predictors run in the example's Python process. **Sol and Luna
+remain OpenAI API answer models**; this setup does not serve them locally.
 
-This is an optional inference deployment. The main example can use SIE Cloud
-for these calls and needs only one GPU for LoRA training.
+Use a Linux x86-64 GPU machine, Docker Engine with BuildKit, Docker Compose v2
+and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+The encoder component has been exercised on an H100 80 GB. Smaller GPUs have
+not been validated for this configuration. It reserves 85% of its GPU, so
+stop it before running LoRA training on the same device.
 
-You need **Linux, Docker Compose, NVIDIA Container Toolkit and three separate
-NVIDIA GPUs**. The validation hardware is three H100 80 GB GPUs. The strong
-model's pinned image requires a CUDA 13 compatible driver. This is a larger
-deployment than the single GPU used to train Laya's LoRA adapter. Sharing one
-GPU between all three workers has not been validated.
+Although its filename says `cuda12`, the SGLang runtime stage contains CUDA
+**12.9.1** and compiles kernels at startup. Use a driver supporting that
+toolkit; NVIDIA lists Linux driver **575.57.08 or newer** for CUDA 12.9 Update 1.
+The generic CUDA-12 compatibility floor is insufficient to establish support
+for these JIT kernels. See the [CUDA release notes](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-toolkit-release-notes/index.html#cuda-driver).
 
-The first start downloads about 48 GB of model weights, in addition to the
-container images. The named `model-cache` volume retains those weights.
-Each worker gets a separate runtime because the answer models need different
-SGLang/CUDA versions. The answer workers use released images pinned by digest.
-The encoder builds the `sglang-embedding` bundle from an exact public SIE
-commit: the released generation bundle does not accept embedding adapters.
-This initial CPU image build also takes time. The image digests, build commit
-and model revisions are pinned in [compose.yaml](compose.yaml) and [models/](models/).
+There is no published SIE image for the `sglang-embedding` bundle at this
+source revision. Compose builds the [public Dockerfile](https://github.com/superlinked/sie/blob/975d5309ba3af9eaeb13725b20dcf10d906c3e2a/packages/sie_server/Dockerfile.cuda12)
+with `BUNDLE=sglang-embedding` from commit
+`975d5309ba3af9eaeb13725b20dcf10d906c3e2a`. The image name in Compose is a local
+build tag. No private repository, private image or package index is required.
+The first build needs network access and substantial disk space for the CUDA
+image and build layers. The first server start also downloads approximately
+8.04 GB of encoder weights; a named volume retains weights and kernel caches.
 
-Run these commands from `examples/train-a-router`:
+Run these commands from
+the example folder on the GPU machine:
 
-```sh
-# Check the Compose configuration and start all workers, waiting for model readiness.
+```bash
+# Check GPU visibility and the Compose configuration without starting a model.
+nvidia-smi
 docker compose -f self-host/compose.yaml config --quiet
-docker compose -f self-host/compose.yaml up --build --detach --wait --wait-timeout 1200
 ```
 
-The default device IDs are 0, 1 and 2. Set `CHEAP_GPU`, `STRONG_GPU` and
-`ENCODER_GPU` before startup to choose different, distinct devices. Cold model
-loading takes several minutes. Inspect startup with
-`docker compose -f self-host/compose.yaml logs --tail 100` if readiness fails.
-The health checks require each pinned model profile to be loaded; a running
-HTTP process alone does not count as ready. The SDK smoke below additionally
-checks real inference and the structured final-answer path.
-
-```sh
-# Install the client dependencies and check metadata, embeddings and both answer protocols.
-uv sync --frozen --group outcomes
-export SIE_BASE_URL=http://127.0.0.1:8080
-export SIE_API_KEY=''
-uv run --frozen --group outcomes python self-host/smoke.py \
-  --output run-output/self-host-smoke
+```bash
+# Build the public encoder image once; no GPU is required during image construction.
+docker compose -f self-host/compose.yaml build encoder
 ```
 
-The smoke check makes one embedding request and an initial answer plus a
-forced structured finalizer for each answer model. The cheap worker preloads
-both its speculative and grammar-safe engines, reserving 40% of GPU memory
-for each. This avoids loading a second engine during an answer. Token admission
-is capped at 8,192 per profile; this recipe is for sequential requests.
-It validates immutable model revisions and saves an incomplete receipt
-if any step fails. Use a new output directory for another attempt.
-
-After following the main example's training instructions:
-
-```sh
-# Route a new request with your saved classifiers, then call only the selected answer model.
-uv run --frozen --group outcomes python router.py answer \
-  --study evidence --run run-output/my-router --population expanded \
-  --method embedding \
-  --question 'A rectangle has perimeter 30 and length 9. What is its area?' \
-  --target 1 --self-hosted --output run-output/self-hosted-answer
+```bash
+# Start the encoder and wait for the exact model revision to be loaded.
+docker compose -f self-host/compose.yaml up --detach --wait --wait-timeout 1200 encoder
 ```
 
-`--self-hosted` allows missing Cloud billing receipts; GPU hosting is still
-unpriced. It preserves model identity checks. The saved calibration target is
-not a guarantee for an individual answer or a new workload.
+Set `ENCODER_GPU` to a device ID before starting if GPU 0 is not the intended
+device. The health check reads model metadata: it requires the pinned revision,
+`loaded=true` and 2,560 output dimensions. It does not make inference requests.
+Cold download/loading can take several minutes. Inspect a failed startup with
+`docker compose -f self-host/compose.yaml logs --tail 100 encoder`.
 
-```sh
-# Stop the workers and proxy while preserving the downloaded model cache.
+```bash
+# Make one synthetic embedding request through the SIE SDK; no answer model is called.
+docker compose -f self-host/compose.yaml exec -T encoder \
+  python /opt/check_encoder.py --smoke > encoder-smoke.json
+```
+
+The smoke validates the returned model, ID, vector size, finiteness and unit
+norm. It uses the same instruction, `is_query=true` and float32 output as the
+example. No API key is needed. GPU hosting remains a real cost; the smoke
+does not assign it a Cloud debit or call it free.
+
+```bash
+# Regenerate question features locally while keeping the published vectors unchanged.
+uv run --frozen --group live python router.py encode \
+  --data data --output local-features \
+  --sie-base-url http://127.0.0.1:8000 --self-hosted
+```
+
+Use `--features local-features` for both classifier fitting and embedding
+scoring in a new run. The model revision and encoding settings match the
+recorded recipe, but a different inference runtime need not produce
+bit-identical vectors. The existing recordings remain the exact replay path.
+
+```bash
+# Use the local encoder with the saved policy; OPENAI_API_KEY is still needed for the selected answer model.
+uv run --frozen --group live python router.py answer \
+  --run data/reference --method embedding \
+  --question 'Which planet is closest to the Sun? A. Mercury B. Venus' \
+  --answer-type choice --choices A B --output answers/local-encoder-planet \
+  --sie-base-url http://127.0.0.1:8000 --self-hosted
+```
+
+With `--self-hosted`, the example explicitly suppresses SIE Cloud credentials
+for the encoder. Your shell environment does not need to change. Use a new
+output directory for each live request.
+
+```bash
+# Stop the encoder while preserving the downloaded model and kernel caches.
 docker compose -f self-host/compose.yaml down
 ```
 
-The frontend listens only on `127.0.0.1:8080`; worker ports 18081–18083 are also
-published only on loopback. SGLang child ports stay on the private Compose
-network. This is a trusted local deployment with no API-key authentication.
-Docker administrators and other local users are privileged peers. Do not
-publish these ports on a network without designing and reviewing authentication.
+For a GPU VM, run Compose on that machine. Run the example there too, or
+forward its loopback endpoint over SSH:
 
-The small proxy accepts only the three pinned model metadata paths, the
-encoder path and chat completion requests for the two answer models. It bounds
-request bodies and headers, rejects ambiguous JSON model fields and strips
-client credentials before forwarding. There are no automatic request retries.
+```bash
+# From your client machine, keep a tunnel to the GPU VM open while using the local endpoint.
+ssh -N -L 8000:127.0.0.1:8000 your-user@your-gpu-vm
+```
 
-The GPU smoke passed with both exact released answer images and the pinned
-encoder build: all three model revisions, embeddings, both initial/finalizer
-pairs, and one public routed request. Application processes ran as UID 1000
-with writable caches and the original image dependencies. Modal connected the
-isolated workers through authenticated tunnels and required materializing the
-encoder Dockerfile's final `FROM` build argument to its intended stage; the
-public Compose build uses the original Dockerfile and ordinary build arguments.
-A complete Docker Compose GPU stack has not been executed as one deployment.
-These checks do not establish throughput or bit-for-bit equivalence with
-SIE Cloud.
+Only `127.0.0.1:8000` is published. Authentication is disabled for this trusted
+local endpoint; do not expose the port publicly. The SGLang child stays inside
+the container, and the server runs as UID 1000 with a writable named cache.
+
+The source-built encoder component and pinned weights have passed a prior
+GPU functionality check. This new single-service Compose wrapper has only
+been checked statically; a complete Compose GPU launch has not yet been run.
+Source/model pins do not make the Docker build fully reproducible: upstream
+base-image tags and some transitive dependency ranges can move. Preserve the
+resulting image and its digest for a deployment you intend to reproduce.

@@ -1,0 +1,12 @@
+{
+  "experiment_sources_modified": false,
+  "files_sha256": {
+    "paired_calibration.py": "5bb809e6e4ba1953a8bdfedb489fd8e1f76fcbda8a236ad57c397e4c9cd9509e",
+    "paired_native.py": "6838832421cff5c4f7d52ffdf800f7f3388da05e930a72b6f24cc1303e588e6d",
+    "paired_report.py": "d2d838e21b590843d57273b80f9b8b206aa38bec4eea657afbe33aed291f89ae",
+    "paired_topic.py": "7cc5b2b297d5f82fb03fceeab9eed8b71b7d392c90850a3cdac29356f803ace2",
+    "paired_training.py": "c877e727b92ad31d44736768a50c132a96d034f52f066577cd52b5cf5a7a9062",
+    "utility_router.py": "8f79c84e15cbbe8b174b08d5e4b6af5c66a545f429eda6cf2536b3f086f4d441"
+  },
+  "format": "routerbench-portable-source-snapshot-v1"
+}
